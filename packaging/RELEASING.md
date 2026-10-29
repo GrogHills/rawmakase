@@ -203,12 +203,13 @@ built, from the source being packaged (the release jobs pass
 `release-source/Cargo.toml`) with that source's `packaging/about.toml` and
 `packaging/notices.hbs`, so a rebuild of a tag from before the notices
 (v0.4.8 and earlier) packages it without them, as it was released. It lists the
-crates of every platform in deny.toml's `targets`, so every package carries the
-same file, and the Arch build that CI runs on each pull request checks the
-whole configuration, macOS and Windows crates included. The release jobs install cargo-about 0.9.3
-with `cargo install`; the Arch recipes take Arch's `cargo-about` package. It
-reads license files only from the crates' sources, so the same lockfile always
-gives the same file, and any warning fails the build.
+crates of every platform in deny.toml's `targets`, and the Arch build that CI
+runs on each pull request checks the whole configuration, macOS and Windows
+crates included. The release jobs install cargo-about 0.9.3 with `cargo
+install`, so their packages carry the same file; the Arch recipes take Arch's
+`cargo-about` package, whose version is not pinned. It reads license files only
+from the crates' sources, so the same lockfile and cargo-about always give the
+same file, and any warning fails the build.
 A crate that does not ship its license file in a recognised form gets a
 checksum-pinned clarification in `about.toml`; when a dependency update changes
 a pinned file, check the new text and update the checksum. Crates published

@@ -31,6 +31,8 @@ def generate(manifest, output, offline=False):
     Returns False, writing nothing, for a source without the notices' configuration.
     """
     manifest, output = Path(manifest), Path(output)
+    if not manifest.is_file():
+        raise SystemExit(f"{manifest} not found")
     config = manifest.parent / "packaging/about.toml"
     template = manifest.parent / "packaging/notices.hbs"
     if not config.is_file():

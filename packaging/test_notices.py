@@ -32,6 +32,7 @@ class GenerateTests(unittest.TestCase):
         (self.source / "packaging").mkdir(parents=True)
         (self.source / "packaging/about.toml").touch()
         self.manifest = self.source / "Cargo.toml"
+        self.manifest.touch()
         self.output = Path(temporary.name) / notices.NAME
         self.calls = []
 
@@ -71,6 +72,12 @@ class GenerateTests(unittest.TestCase):
     def test_offline_does_not_fetch(self):
         self.generate(offline=True)
         self.assertEqual([command[:2] for command in self.calls], [["cargo", "about"]])
+
+    def test_a_missing_manifest_fails_rather_than_skipping(self):
+        self.manifest.unlink()
+        with self.assertRaisesRegex(SystemExit, "not found"):
+            self.generate()
+        self.assertEqual(self.calls, [])
 
     def test_a_warning_fails_and_leaves_no_notices(self):
         # What cargo-about prints, exiting 0, when a pinned license file changed.
