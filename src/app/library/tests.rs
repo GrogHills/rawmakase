@@ -147,7 +147,7 @@ fn an_unsupported_jpeg_says_why_in_develop() -> Result<()> {
 
 /// A phone's HEIC is added with a folder and opens in Develop as a JPEG does;
 /// an HDR one is shown in the Library but Develop says why it can't edit it.
-#[cfg(any(target_os = "macos", feature = "software-hevc"))]
+#[cfg(any(target_os = "macos", all(feature = "software-hevc", not(windows))))]
 #[test]
 fn a_heic_opens_in_develop_and_an_hdr_one_says_why_not() -> Result<()> {
     let formats = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/formats");

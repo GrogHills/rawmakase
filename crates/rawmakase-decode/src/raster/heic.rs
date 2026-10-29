@@ -1,7 +1,8 @@
 //! A HEIC (a HEIF of HEVC) still: our reading of its container
 //! ([`rawmakase_interop::isobmff`]) here, its pixels decoded by the system's
 //! HEVC decoder where it has one for RAWmakase to use (macOS's ImageIO,
-//! `imageio`), and otherwise by RAWmakase's own (`software`). Either way the
+//! `imageio`; Windows Imaging Component, `wic`), and otherwise by RAWmakase's
+//! own (`software`). Either way the
 //! header here says the size, crop, colour and orientation, and what Develop
 //! refuses.
 //!
@@ -33,13 +34,17 @@ use std::sync::Arc;
 mod imageio;
 #[cfg(target_os = "macos")]
 use imageio::pixels;
-#[cfg(all(feature = "software-hevc", not(target_os = "macos")))]
+#[cfg(windows)]
+mod wic;
+#[cfg(windows)]
+use wic::pixels;
+#[cfg(all(feature = "software-hevc", not(any(target_os = "macos", windows))))]
 mod software;
-#[cfg(all(feature = "software-hevc", not(target_os = "macos")))]
+#[cfg(all(feature = "software-hevc", not(any(target_os = "macos", windows))))]
 use software::pixels;
 
 /// No decoder in this build.
-#[cfg(not(any(feature = "software-hevc", target_os = "macos")))]
+#[cfg(not(any(feature = "software-hevc", target_os = "macos", windows)))]
 fn pixels(_: HeicFile) -> Result<Pixels> {
     bail!("This build of RAWmakase has no HEVC decoder, so it can't show HEIF images")
 }
@@ -82,7 +87,7 @@ struct Layout {
     tiles: Vec<(u32, Arc<hevc::Config>)>,
     // RAWmakase's own decoder lays out the tiles; a platform's the file.
     #[cfg_attr(
-        not(all(feature = "software-hevc", not(target_os = "macos"))),
+        not(all(feature = "software-hevc", not(any(target_os = "macos", windows)))),
         allow(dead_code)
     )]
     columns: u32,
@@ -95,16 +100,16 @@ pub(super) struct HeicFile {
     /// More than 8 bits per sample, from `hvcC`.
     deep: bool,
     /// Where the file is, for a system decoder to open.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     path: std::path::PathBuf,
     /// The file and its boxes, to read the pictures from when decoding.
     #[cfg_attr(
-        not(all(feature = "software-hevc", not(target_os = "macos"))),
+        not(all(feature = "software-hevc", not(any(target_os = "macos", windows)))),
         allow(dead_code)
     )]
     file: std::fs::File,
     #[cfg_attr(
-        not(all(feature = "software-hevc", not(target_os = "macos"))),
+        not(all(feature = "software-hevc", not(any(target_os = "macos", windows)))),
         allow(dead_code)
     )]
     heif: Heif,
@@ -164,8 +169,15 @@ impl HeicFile {
         // header, so Develop says why, as for a tiled AVIF.
         // RAWmakase's own decoder reads 4:2:0 and 4:4:4; the system's decide
         // for themselves.
-        let own = cfg!(all(feature = "software-hevc", not(target_os = "macos")));
-        let refused = if cfg!(not(any(feature = "software-hevc", target_os = "macos"))) {
+        let own = cfg!(all(
+            feature = "software-hevc",
+            not(any(target_os = "macos", windows))
+        ));
+        let refused = if cfg!(not(any(
+            feature = "software-hevc",
+            target_os = "macos",
+            windows
+        ))) {
             Some(Unsupported("HEIF".into()))
         } else if own && chroma == 0 {
             Some(Unsupported("monochrome HEIF".into()))
@@ -194,6 +206,15 @@ impl HeicFile {
 
     pub(super) fn refusal(&self) -> Option<Unsupported> {
         self.refused.as_ref().map(|r| Unsupported(r.0.clone()))
+    }
+
+    /// Whether a picture of `width` × `height` is this image: the whole
+    /// picture, or its crop alone. A system decoder's size is checked so
+    /// before anything that size is allocated.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    fn expects(&self, width: u32, height: u32) -> bool {
+        (width, height) == (self.layout.width, self.layout.height)
+            || (width, height) == (self.crop.width, self.crop.height)
     }
 }
 

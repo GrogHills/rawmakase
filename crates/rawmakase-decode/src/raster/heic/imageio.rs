@@ -29,8 +29,8 @@ pub(super) fn pixels(file: HeicFile) -> Result<Pixels> {
         unsafe { source.image_at_index(source.primary_image_index(), None) }.ok_or_else(failed)?;
     let (width, height) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
     ensure!(
-        width > 0 && height > 0,
-        "macOS decoded the HEIF image empty"
+        file.expects(u32::try_from(width)?, u32::try_from(height)?),
+        "The HEIF image is not the size it says"
     );
     let space = match avif::profile(file.icc.as_ref(), file.nclx) {
         // SAFETY: the data is a CFData, as the function takes.

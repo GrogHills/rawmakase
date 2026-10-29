@@ -10,8 +10,9 @@ publish = false
 [features]
 default = ["software-hevc"]
 # HEIC decoded in pure Rust (rust_h265) where the system has no HEVC decoder
-# for RAWmakase to use; macOS decodes HEIC with its own (ImageIO). Without it
-# such a build lists HEIF photos but can't show them.
+# for RAWmakase to use; macOS and Windows decode HEIC with their own (ImageIO,
+# Windows Imaging Component). Without it such a build lists HEIF photos but
+# can't show them.
 software-hevc = ["dep:rust_h265"]
 # The model's fixtures, for tests that share them.
 test-support = ["rawmakase-model/test-support", "rawmakase-engine/test-support"]
@@ -44,7 +45,7 @@ tempfile = "3"
 
 # HEIC's HEVC in pure Rust, without `unsafe` or build scripts (the
 # software-hevc feature), where the system has no decoder for RAWmakase.
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
 rust_h265 = { version = "0.2.0", optional = true }
 
 # HEIC decoded by the system's ImageIO, drawn by CoreGraphics.
@@ -59,6 +60,9 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
+# HEIC decoded by Windows Imaging Component, a COM API windows-sys has no
+# vtables for; the version the app builds.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Imaging", "Win32_System_Com"] }
 
 [dev-dependencies]
 rawmakase-raw = { path = "../rawmakase-raw", version = "0.1.0", features = ["test-support"] }
