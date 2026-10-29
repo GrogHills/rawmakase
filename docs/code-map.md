@@ -352,7 +352,7 @@ above rather than implementing SQL, file formats or pixel processing.
 | [library/cell.rs](../src/app/library/cell.rs) | Individual photo grid cells. |
 | [library/kinetic.rs](../src/app/library/kinetic.rs) | Kinetic scrolling for the grid and the filmstrip: a trackpad swipe keeps gliding after the fingers lift (where the platform does not glide itself), fed to the scroll area as wheel input. |
 | [library/thumbnails.rs](../src/app/library/thumbnails.rs) | Batched file availability and bounded thumbnail work using the RAW API (a RAW's file facts and its smallest embedded preview that reaches the thumbnail's size, without `photo::open`) and preview cache. |
-| [library/previews.rs](../src/app/library/previews.rs) | The two preview workers with their disk cache and progress: embedded thumbnails, made by two to four workers side by side; and each photo's edited preview, from an `EditQueue` whose `Pace` the workspace sets (one render at a time on two threads, or, with the Library in front and nothing else rendering, up to four renders side by side on every core but one, and photos asked for ahead). |
+| [library/previews.rs](../src/app/library/previews.rs) | The two preview workers with their disk cache and progress: embedded thumbnails, made by two to four workers side by side at normal priority; and each photo's edited preview, from an `EditQueue` whose `Pace` the workspace sets (one render at a time on two threads, or, with the Library in front and nothing else rendering, up to four renders side by side on every core but one, and, once the grid's embedded previews are in, up to 500 photos after the view asked for ahead). |
 
 ### Background work
 

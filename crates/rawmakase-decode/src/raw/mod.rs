@@ -31,8 +31,7 @@ pub fn developed() -> String {
 /// Every worker that reads or decodes photos behind the user's back starts
 /// here or in [`background_pool`], so none competes with Develop for the CPU;
 /// one that takes a wider pool of its own does so only while Develop is not
-/// in front (the Library's edited previews), or for file reads that leave
-/// most cores idle (its thumbnails).
+/// in front (the Library's edited previews).
 pub fn spawn_background(work: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         // `work` runs on the pool's threads, which lower their own priority

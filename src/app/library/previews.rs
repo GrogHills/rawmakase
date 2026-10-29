@@ -25,8 +25,9 @@ pub(super) struct PreviewResult {
 pub(super) type Worker<J, R> = (J, Receiver<R>, JoinHandle<()>);
 
 /// The thumbnail workers, which end once their requests or their results
-/// are dropped: a few side by side at background priority (see
-/// [`thumbnail_threads`]), so one slow file or disk doesn't hold up the rest.
+/// are dropped: a few side by side (see [`thumbnail_threads`]), so one slow
+/// file or disk doesn't hold up the rest. They run at normal priority, as the
+/// one worker did, so the grid fills before edited previews are rendered.
 pub(super) fn spawn(
     cache_path: PathBuf,
     ctx: egui::Context,
@@ -102,15 +103,19 @@ fn spawn_with(
             }
             ctx.request_repaint();
         };
-        match crate::raw::background_pool(threads, "thumbnail") {
-            // Returns once every worker has ended.
-            Ok(pool) => pool.scope(|scope| {
-                for cache in caches {
-                    scope.spawn(|_| work(cache));
-                }
-            }),
-            Err(_) => caches.into_iter().take(1).for_each(work),
-        }
+        // One works on this thread, so a worker the system can't start
+        // leaves the others; returns once every worker has ended.
+        let work = &work;
+        let mut caches = caches.into_iter();
+        let first = caches.next();
+        std::thread::scope(|scope| {
+            for cache in caches {
+                let _ = std::thread::Builder::new()
+                    .name("thumbnail".into())
+                    .spawn_scoped(scope, move || work(cache));
+            }
+            first.into_iter().for_each(work);
+        });
     });
     (tx, result_rx, thread)
 }
@@ -185,7 +190,8 @@ pub(super) type Wanted = Arc<Mutex<HashSet<PhotoId>>>;
 /// What an edited preview job came to, by photo and the ticket it was asked with.
 pub(super) enum EditResult {
     Ready(PhotoId, u64, image::RgbImage),
-    /// Rendered ahead and kept in the cache, the photo not shown yet.
+    /// Asked ahead and not shown yet: rendered and kept in the cache, or not
+    /// rendered, there being no cache to keep it in. Asked again when shown.
     Kept(PhotoId, u64),
     /// The photo scrolled out of view first, or its render gave way to
     /// Develop; request it again when shown.
@@ -486,9 +492,13 @@ impl Renders {
     fn answer(&self, id: PhotoId, ticket: u64, ahead: bool, image: image::RgbImage) -> EditResult {
         answer(&self.wanted, id, ticket, ahead, image)
     }
-    /// Renders the job at `index` on the pool of the pace it starts at.
+    /// Renders the job at `index` on the pool of the pace it starts at. A
+    /// photo asked ahead and not shown is not rendered with no cache to keep
+    /// it in (rendered when shown), nor once the pace has dropped since it
+    /// was looked up.
     fn start(&self, index: usize) {
         let shared = &self.results.shared;
+        let no_cache = cache(&self.cache).is_none();
         let mut state = shared.lock();
         let EditJob::Render {
             id,
@@ -500,6 +510,18 @@ impl Renders {
         else {
             unreachable!("stores are not rendered")
         };
+        if ahead && !shown(&self.wanted, id) {
+            let answer = if no_cache {
+                Some(EditResult::Kept(id, ticket))
+            } else {
+                (state.pace == Pace::Background).then_some(EditResult::Skipped(id, ticket))
+            };
+            if let Some(answer) = answer {
+                drop(state);
+                self.results.send(answer);
+                return;
+            }
+        }
         let full = state.pace == Pace::Full;
         let slot = state.next_slot;
         state.next_slot += 1;
@@ -521,6 +543,10 @@ impl Renders {
             let _finished = Finished(results.shared.clone(), slot);
             let mut cache_error = None;
             let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Given up before it began: not even the file is read.
+                if cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
                 let stamp = Stamp::read(&path).ok()?;
                 let image = render(&path, &source, &cancel).ok()?;
                 if let Some(cache) = &mut *cache(&cache_at)
@@ -559,11 +585,18 @@ fn answer(
     ahead: bool,
     image: image::RgbImage,
 ) -> EditResult {
-    if ahead && !wanted.lock().unwrap().contains(&id) {
+    if ahead && !shown(wanted, id) {
         EditResult::Kept(id, ticket)
     } else {
         EditResult::Ready(id, ticket, image)
     }
+}
+/// Whether photo `id` was shown last frame.
+fn shown(wanted: &Wanted, id: PhotoId) -> bool {
+    wanted
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&id)
 }
 /// Ends a render's slot however the render ends, panics included.
 struct Finished(Arc<Shared>, u64);
@@ -1117,6 +1150,61 @@ pub(super) mod tests {
             EditResult::Kept(PhotoId(1), 1)
         ));
         assert_eq!(RENDERS.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    /// Renders that only count themselves, for a job taken from `shared`.
+    fn counting(
+        shared: &Arc<Shared>,
+        cache: Option<PreviewCache>,
+        wanted: Wanted,
+    ) -> (Renders, Receiver<EditResult>) {
+        fn render(_: &Path, _: &EditSource, _: &AtomicBool) -> anyhow::Result<image::RgbImage> {
+            RENDERED.fetch_add(1, Ordering::SeqCst);
+            Ok(image::RgbImage::new(4, 4))
+        }
+        let (tx, rx) = mpsc::channel();
+        let renders = Renders {
+            background: None,
+            full: None,
+            cache: Arc::new(Mutex::new(cache)),
+            cache_path: PathBuf::new(),
+            wanted,
+            results: Results {
+                tx,
+                shared: shared.clone(),
+                ctx: egui::Context::default(),
+            },
+            render,
+        };
+        (renders, rx)
+    }
+    static RENDERED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    #[test]
+    fn photos_asked_ahead_are_not_rendered_once_they_lost_their_reason() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = edited_png(directory.path(), "1.png")?;
+        let queued = |job| Queued { job, missed: false };
+        // No cache to keep it in: rendered when shown.
+        let shared = Arc::<Shared>::default();
+        shared.lock().pace = Pace::Full;
+        shared.lock().jobs.push(queued(render_job(1, &path, true)));
+        let (renders, rx) = counting(&shared, None, Wanted::default());
+        renders.start(0);
+        assert!(matches!(rx.try_recv(), Ok(EditResult::Kept(PhotoId(1), 1))));
+        // Looked up at full pace, started once Develop came to the front.
+        let shared = Arc::<Shared>::default();
+        shared.lock().jobs.push(queued(render_job(2, &path, true)));
+        let cache = PreviewCache::open(&directory.path().join("previews.sqlite3"))?;
+        let (renders, rx) = counting(&shared, Some(cache), Wanted::default());
+        renders.start(0);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EditResult::Skipped(PhotoId(2), 2))
+        ));
+        assert!(shared.lock().running.is_empty());
+        assert_eq!(RENDERED.load(Ordering::SeqCst), 0);
         Ok(())
     }
 

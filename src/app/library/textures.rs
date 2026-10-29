@@ -16,11 +16,14 @@ use std::{
 
 /// Textures kept per cache; older ones are dropped first.
 const KEPT: usize = 192;
-/// Photos asked for ahead at once; looked at for it in a frame; and whose edit
-/// is read from the catalog for it in a frame, on the UI thread.
+/// Photos asked for ahead at once; looked at for it in a frame; whose edit
+/// is read from the catalog for it in a frame, on the UI thread; and asked
+/// for ahead from one view, a small part of what the preview cache keeps, so
+/// none pushes out another or the embedded previews.
 const AHEAD: usize = 32;
 const AHEAD_SCAN: usize = 256;
 const AHEAD_LOOKUPS: usize = 16;
+const AHEAD_WINDOW: usize = 500;
 
 pub(super) struct PreviewTextures {
     /// Embedded previews by file. Virtual copies share a file, and so this.
@@ -288,9 +291,10 @@ impl PreviewTextures {
             self.ahead_scan.1 = 0;
         }
     }
-    /// At [`Pace::Full`], asks for the edited previews of the `photos` at
-    /// `order` not shown yet, a few at a time from position `start` on (and
-    /// then from the first), so they come from the cache once shown. `edit`
+    /// At [`Pace::Full`], once the embedded previews asked for are in, asks
+    /// for the edited previews of the `photos` at `order` not shown yet, a few
+    /// at a time from position `start` on (and then from the first), up to
+    /// [`AHEAD_WINDOW`] of them, so they come from the cache once shown. `edit`
     /// looks up each photo's edit when it is first asked about, as for a
     /// photo shown.
     pub(super) fn request_ahead(
@@ -300,9 +304,12 @@ impl PreviewTextures {
         start: usize,
         mut edit: impl FnMut(PhotoId) -> Option<EditSource>,
     ) {
-        if self.pace != Pace::Full || order.is_empty() {
+        if self.pace != Pace::Full || order.is_empty() || !self.pending.is_empty() {
             return;
         }
+        // A view not drawn yet, or past the end of a list grown shorter,
+        // starts from the first.
+        let start = if start < order.len() { start } else { 0 };
         if self.ahead_scan.0 != start {
             self.ahead_scan = (start, 0);
         }
@@ -310,7 +317,7 @@ impl PreviewTextures {
         while self.ahead.len() < AHEAD
             && scanned < AHEAD_SCAN
             && looked_up < AHEAD_LOOKUPS
-            && self.ahead_scan.1 < order.len()
+            && self.ahead_scan.1 < order.len().min(AHEAD_WINDOW)
         {
             let Some(photo) = photos.get(order[(start + self.ahead_scan.1) % order.len()]) else {
                 break;

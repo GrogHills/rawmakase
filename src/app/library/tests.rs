@@ -4040,6 +4040,18 @@ fn edited_previews_are_asked_ahead_only_at_full_pace_in_order_from_the_view() ->
     library.cache.request_ahead(&photos, &order, 2, edit);
     assert!(asked(&jobs).is_empty());
     library.cache.set_pace(Pace::Full);
+    // Not while embedded previews asked for are still coming.
+    library.cache.pending.insert(photos[0].path.clone());
+    library.cache.request_ahead(&photos, &order, 2, edit);
+    assert!(asked(&jobs).is_empty());
+    library.cache.pending.clear();
+    // Before the grid is drawn its range ends at usize::MAX: from the first.
+    library
+        .cache
+        .request_ahead(&photos, &order, usize::MAX, |_| None);
+    assert!(asked(&jobs).is_empty());
+    assert_eq!(library.cache.edited_requested.len(), photos.len());
+    library.cache.edited_requested.clear();
     // Photo b is shown, so asked already; the rest from after the view on.
     library.cache.edited_requested.insert(photos[1].id, 99);
     library.cache.request_ahead(&photos, &order, 2, edit);
