@@ -3,10 +3,13 @@
 
 Usage: python3 scripts/make-heic-fixtures.py tests/data/formats
 Needs Pillow and pillow-heif (libheif with x265). Every image is drawn here;
-nothing comes from a camera or a photo. metadata.heic, ten-bit.heic, p3.heic
-and pq.heic are libheif's own files; the grid and the turned files are written
-here around HEVC x265 coded, so each has the boxes its test needs, and without
-x265's SEI banner, which would make them several kilobytes.
+nothing comes from a camera or a photo. metadata.heic, ten-bit.heic, p3.heic,
+pq.heic and identity.heic are libheif's own files; the grid and the turned
+files are written here around HEVC x265 coded, so each has the boxes its test
+needs, and without x265's SEI banner, which would make them several kilobytes.
+All but identity.heic are 4:2:0, as phones write, so the system decoders
+macOS and Windows use read them too; identity.heic (lossless 4:4:4 RGB) is for
+RAWmakase's own decoder.
 """
 import importlib.util, io, sys
 from pathlib import Path
@@ -142,12 +145,12 @@ def nclx(primaries, transfer, matrix, full_range):
 
 
 def turned(out: Path, name: str, transforms):
-    """corners() losslessly in RGB, so its colours come back exactly, with
-    libheif's own crop of its 64x64 picture, then `transforms`."""
-    hvcc, props, data = coded(corners(), quality=-1, chroma=444, matrix_coefficients=0)
+    """corners() in 4:2:0, with libheif's own crop of its 64x64 picture, then
+    `transforms`."""
+    hvcc, props, data = coded(corners(), quality=95)
     props = [(p, e) for p, e in props if p[4:8] != b"hvcC"]
     props = [(hvcc, True)] + props + [(t, True) for t in transforms]
-    (out / name).write_bytes(heif([b"heix", b"mif1", b"miaf"], 1, [(1, b"hvc1", props, data, False, False)]))
+    (out / name).write_bytes(heif([b"heic", b"mif1", b"miaf"], 1, [(1, b"hvc1", props, data, False, False)]))
 
 
 def main(out: Path):
@@ -160,11 +163,13 @@ def main(out: Path):
     # 16-bit samples (native, little endian), which libheif stores in 10 bits.
     sixteen = b"".join((v * 257).to_bytes(2, "little") for v in src.tobytes())
     deep = pillow_heif.from_bytes(mode="RGB;16", size=src.size, data=sixteen)
-    deep.save(out / "ten-bit.heic", quality=-1, chroma=444)
-    # Lossless P3: the identity matrix, so the stored values are the drawing's.
-    pillow_heif.from_pillow(src).save(out / "p3.heic", quality=-1, chroma=444,
-                                      matrix_coefficients=0, color_primaries=12,
-                                      transfer_characteristics=13)
+    deep.save(out / "ten-bit.heic", quality=95)
+    pillow_heif.from_pillow(src).save(out / "p3.heic", quality=95, matrix_coefficients=6,
+                                      color_primaries=12, transfer_characteristics=13)
+    # Lossless 4:4:4 through the identity matrix: the stored values are the
+    # drawing's.
+    pillow_heif.from_pillow(src).save(out / "identity.heic", quality=-1, chroma=444,
+                                      matrix_coefficients=0)
     deep.save(out / "pq.heic", quality=95, matrix_coefficients=9, color_primaries=9,
               transfer_characteristics=16)
 

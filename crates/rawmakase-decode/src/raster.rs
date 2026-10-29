@@ -1269,16 +1269,19 @@ mod tests {
         // As rotated.avif: irot 1 brings the top-right (green) to the top-left,
         // after the crop.
         assert_eq!(super::dimensions(&fixture("rotated.heic")), Some((12, 16)));
+        // 4:2:0, as phones write, so near.
         let rotated = decode(&fixture("rotated.heic")).unwrap();
         assert_eq!(rotated.dimensions(), (12, 16));
-        assert_eq!(
+        assert_corners_near(
             corners(&rotated),
-            [[0, 255, 0], [255, 255, 255], [255, 0, 0], [0, 0, 255]]
+            [[0, 255, 0], [255, 255, 255], [255, 0, 0], [0, 0, 255]],
+            4,
         );
         let mirrored = decode(&fixture("rotated-mirrored.heic")).unwrap();
-        assert_eq!(
+        assert_corners_near(
             corners(&mirrored),
-            [[255, 0, 0], [0, 0, 255], [0, 255, 0], [255, 255, 255]]
+            [[255, 0, 0], [0, 0, 255], [0, 255, 0], [255, 255, 255]],
+            4,
         );
     }
 
@@ -1295,10 +1298,20 @@ mod tests {
         Ok(())
     }
 
+    /// Lossless 4:4:4 through the identity matrix (GBR): RAWmakase's own
+    /// decoder gives the drawing back exactly.
+    #[cfg(feature = "software-hevc")]
+    #[test]
+    fn a_lossless_rgb_heic_decodes_exactly() {
+        let image = decode(&fixture("identity.heic")).unwrap();
+        assert_eq!(corners(&image), UPRIGHT);
+        assert_eq!(image.get_pixel(8, 6).0, [128; 3]);
+    }
+
     #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heics_cicp_colours_are_converted() {
-        // As p3.avif: lossless P3 through the identity matrix.
+        // As p3.avif, but 4:2:0.
         let image = decode(&fixture("p3.heic")).unwrap();
         let grey = image.get_pixel(8, 6).0;
         assert!(grey.iter().all(|v| v.abs_diff(128) <= 1), "{grey:?}");
