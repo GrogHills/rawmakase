@@ -702,7 +702,18 @@ pub(super) fn develop_quickly(
         crate::photo::Opened::Rendered(image) => image,
     };
     anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Cancelled");
-    let out = crate::develop::render(&image, &recipe.checked()?, edge)?;
+    finish_quickly(&image, &recipe, edge, cancel)
+}
+/// `image` rendered with `recipe` within `edge` pixels, given up once `cancel`
+/// is set: a render that gives way to Develop or a close stops in its stages,
+/// not only between them.
+fn finish_quickly(
+    image: &crate::camera_data::CameraImage,
+    recipe: &Recipe,
+    edge: u32,
+    cancel: &AtomicBool,
+) -> anyhow::Result<image::RgbImage> {
+    let out = crate::develop::render_cancellable(image, &recipe.checked()?, edge, cancel)?;
     image::RgbImage::from_raw(out.width, out.height, out.rgb8())
         .ok_or_else(|| anyhow::anyhow!("Invalid preview size"))
 }
@@ -816,6 +827,25 @@ pub(super) mod tests {
             "{:?}",
             image.get_pixel(0, 0)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn an_edited_render_stops_once_cancelled() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("photo.png");
+        let EditSource::Recipe(json) = edited_jpeg(&path)? else {
+            unreachable!()
+        };
+        let recipe: Recipe = serde_json::from_str(&json)?;
+        let crate::photo::Opened::Rendered(image) =
+            crate::photo::open_source(&path, &AtomicBool::new(false))?
+        else {
+            unreachable!("a PNG opens rendered")
+        };
+        assert!(finish_quickly(&image, &recipe, 640, &AtomicBool::new(false)).is_ok());
+        // Set as the render begins, as when the pace drops.
+        assert!(finish_quickly(&image, &recipe, 640, &AtomicBool::new(true)).is_err());
         Ok(())
     }
 

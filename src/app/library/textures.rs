@@ -50,8 +50,8 @@ pub(super) struct PreviewTextures {
     pace: Pace,
     /// Tickets of the edited previews asked for ahead and not yet back.
     pub(super) ahead: HashSet<u64>,
-    /// Photos whose edited preview was rendered ahead and kept in the cache,
-    /// until they are shown or forgotten.
+    /// Photos asked for ahead and answered (kept in the cache, or failed),
+    /// asked again only when shown, until forgotten.
     pub(super) kept: HashSet<PhotoId>,
     /// Where asking ahead got to: the list (by its version) and position it
     /// starts from, and how far past it the photos have been asked about.
@@ -141,14 +141,20 @@ impl PreviewTextures {
                 | EditResult::Skipped(id, ticket)
                 | EditResult::Failed(id, ticket) => (*id, *ticket),
             };
-            if !self.ahead.remove(&ticket) {
+            let ahead = self.ahead.remove(&ticket);
+            if !ahead {
                 self.edits_pending = self.edits_pending.saturating_sub(1);
             }
             let latest = self.edited_requested.get(&id) == Some(&ticket);
             match result {
                 EditResult::Ready(_, _, im) if latest => self.insert_edited(ctx, id, &im),
-                // Asked again when shown, from the cache.
+                // Asked again when shown, from the cache; one that failed ahead
+                // (its file offline, say) is tried again then, not before.
                 EditResult::Kept(..) if latest => {
+                    self.edited_requested.remove(&id);
+                    self.kept.insert(id);
+                }
+                EditResult::Failed(..) if latest && ahead => {
                     self.edited_requested.remove(&id);
                     self.kept.insert(id);
                 }

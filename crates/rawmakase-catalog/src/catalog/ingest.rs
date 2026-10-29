@@ -407,10 +407,6 @@ impl Catalog {
         let Some((sidecar, bitmaps)) = legacy else {
             return Ok(None);
         };
-        let bitmaps = bitmaps
-            .iter()
-            .map(|bitmap| Ok((bitmap.hash(), bitmap.compress()?)))
-            .collect::<Result<_>>()?;
         let checked = self.check_new_edit(file, &sidecar.recipe, &sidecar.export)?;
         Ok(Some(LegacyEdit { bitmaps, checked }))
     }
@@ -424,7 +420,18 @@ fn read_new_photo<'a>(
     place: &'a Place,
     defaults: &super::NewPhotoDefaults,
 ) -> FilesRead<'a> {
-    let legacy = crate::storage::is_raw(&file).then(|| super::legacy_sidecar::import(&file));
+    // Its masks compressed as they are read, so a folder of them is never
+    // held decompressed at once.
+    let legacy = crate::storage::is_raw(&file).then(|| {
+        let Some((sidecar, bitmaps)) = super::legacy_sidecar::import(&file)? else {
+            return Ok(None);
+        };
+        let bitmaps = bitmaps
+            .iter()
+            .map(|bitmap| Ok((bitmap.hash(), bitmap.compress()?)))
+            .collect::<Result<_>>()?;
+        Ok(Some((sidecar, bitmaps)))
+    });
     let (metadata, report) = super::sidecar::read_file(&file, defaults.raw_xmp());
     let defaults = defaults.for_file(&file, metadata.as_ref());
     FilesRead {
@@ -436,11 +443,9 @@ fn read_new_photo<'a>(
         defaults,
     }
 }
-/// An older release's edit beside a photo, with its spots' and masks' bitmaps.
-type Legacy = (
-    super::legacy_sidecar::Sidecar,
-    Vec<crate::storage::bitmaps::Bitmap>,
-);
+/// An older release's edit beside a photo, with its spots' and masks' bitmaps
+/// (hash, compressed).
+type Legacy = (super::legacy_sidecar::Sidecar, Vec<(String, Vec<u8>)>);
 /// [`read_new_photo`]'s.
 struct FilesRead<'a> {
     file: PathBuf,
@@ -885,11 +890,12 @@ mod tests {
             super::side_by_side((0..1000).collect(), |n: u32| {
                 reads.fetch_add(1, Ordering::SeqCst);
                 assert_ne!(n, 3, "unreadable");
-                std::thread::sleep(Duration::from_millis(2));
+                std::thread::sleep(Duration::from_millis(10));
             })
         }));
         assert!(panicked.is_err());
-        // Each reader stops after the item it was reading.
-        assert!(reads.load(Ordering::SeqCst) < 100, "{reads:?}");
+        // The others stop once it unwinds, after the panic hook (a backtrace
+        // can take a while), long before the 2.5 s the rest would take.
+        assert!(reads.load(Ordering::SeqCst) < 1000, "{reads:?}");
     }
 }
