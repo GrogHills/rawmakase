@@ -5,10 +5,7 @@ use super::tree::{FolderNode, TreeAction, folder_tree_row};
 use super::*;
 use crate::catalog::{Folder, PhotoId};
 use eframe::egui::{Color32, Vec2};
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, path::PathBuf};
 #[test]
 fn develop_workspace_drains_library_preview_results() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -150,7 +147,7 @@ fn an_unsupported_jpeg_says_why_in_develop() -> Result<()> {
 #[cfg(any(target_os = "macos", all(feature = "software-hevc", not(windows))))]
 #[test]
 fn a_heic_opens_in_develop_and_an_hdr_one_says_why_not() -> Result<()> {
-    let formats = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/formats");
+    let formats = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/formats");
     let directory = tempfile::tempdir()?;
     let folder = directory.path().join("photos");
     std::fs::create_dir(&folder)?;
