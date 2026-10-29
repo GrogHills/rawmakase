@@ -480,6 +480,8 @@ impl Editor {
         let mut upright_request = false;
         let mut guided_action = None;
         let mut treatment_request = None;
+        let mut fit_camera_look = false;
+        let can_fit_camera_look = self.can_fit_camera_look();
         let mut auto_mix_request = false;
         let mut profile_changed_from = None;
         // A conversion to black & white waiting for the photo to decode.
@@ -562,6 +564,14 @@ impl Editor {
                             return;
                         }
                         ui.separator();
+                        if ui
+                            .add_enabled(can_fit_camera_look, egui::Button::new("Fit Camera Look"))
+                            .on_hover_text("Fits a look to this photo's own JPEG preview, the camera's rendering of it, and uses it as the profile: Camera Look (fitted). It is saved with the edit; fitting again makes a new one.")
+                            .clicked()
+                        {
+                            fit_camera_look = true;
+                            ui.close();
+                        }
                         if !adobe.is_empty()
                             && ui
                                 .button("Import Adobe profiles for this camera")
@@ -1546,6 +1556,9 @@ impl Editor {
         }
         if let Some(treatment) = treatment_request {
             self.set_treatment(treatment);
+        }
+        if fit_camera_look {
+            self.start_camera_look();
         }
         if auto_mix_request {
             self.auto_black_white_mix();

@@ -883,6 +883,7 @@ mod before_after;
 mod brush_scroll;
 mod bulk_import;
 pub use bulk_import::import_profiles;
+mod camera_look;
 mod catalog;
 mod chrome;
 mod clipping;

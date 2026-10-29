@@ -9334,3 +9334,53 @@ fn a_failed_action_stays_on_screen_past_the_librarys_messages_and_progress() {
             .has_entry("No camera look fitted: The preview does not line up")
     );
 }
+
+/// Profile → Fit Camera Look: a refusal (or a panic, which arrives as one) says why
+/// and leaves nothing running; a superseded fit is dropped; the fit is one History
+/// step Undo takes back; a profile chosen while it ran wins over it.
+#[test]
+fn a_fitted_camera_look_is_one_step_and_yields_to_later_choices() {
+    use crate::camera_profiles::fitted;
+    let ctx = egui::Context::default();
+    let mut e = Editor::with_context(&ctx, None, crate::app::session::Session::default(), None);
+    let m = crate::camera_data::Metadata {
+        make: "Test".into(),
+        model: "Camera".into(),
+        cam_xyz: [[0.8, -0.2, -0.1], [-0.3, 1.1, 0.2], [-0.05, 0.15, 0.6]],
+        ..Default::default()
+    };
+    let fit = fitted::with_look(
+        &fitted::standard_base(&m).unwrap(),
+        &fitted::FittedLook::identity(),
+    )
+    .unwrap();
+    let before = e.document.edit.recipe().profile.clone();
+    let (g, _) = e.document.camera_look.start();
+    e.camera_look_ready(g, before.clone(), Err("Stopped unexpectedly: boom".into()));
+    assert!(!e.document.camera_look.is_running());
+    assert!(e.messages.has_entry_with("boom"));
+    assert!(e.running_work().is_empty());
+    assert_eq!(e.document.edit.history().steps().1, 0);
+    // A fit asked for again: the first one's result no longer counts.
+    let (first, _) = e.document.camera_look.start();
+    let (second, _) = e.document.camera_look.start();
+    e.camera_look_ready(first, before.clone(), Ok(Box::new(fit.clone())));
+    assert_eq!(e.document.edit.recipe().profile, before);
+    assert!(e.document.camera_look.is_running());
+    assert_eq!(e.running_work()[0].key, "camera look");
+    e.camera_look_ready(second, before.clone(), Ok(Box::new(fit.clone())));
+    assert_eq!(e.document.edit.recipe().profile.as_deref(), Some(&fit));
+    assert_eq!(e.document.edit.recipe().profile_amount, 1.);
+    let (steps, applied) = e.document.edit.history().steps();
+    assert_eq!((applied, steps[0].name.as_str()), (1, "Fit Camera Look"));
+    e.undo();
+    assert_eq!(e.document.edit.recipe().profile, before);
+    // Another profile chosen while it ran: that choice stays.
+    let (g, _) = e.document.camera_look.start();
+    let chosen = Some(std::sync::Arc::new(fitted::standard_base(&m).unwrap()));
+    e.document.edit.setup_mut().profile = chosen.clone();
+    e.camera_look_ready(g, before, Ok(Box::new(fit)));
+    assert_eq!(e.document.edit.recipe().profile, chosen);
+    assert!(e.messages.has_entry_with("changed"));
+    assert!(!e.document.camera_look.is_running());
+}

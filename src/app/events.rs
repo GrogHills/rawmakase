@@ -138,6 +138,12 @@ impl Editor {
                     analysed,
                     result,
                 } if id == self.load.id() => self.upright_ready(generation, &analysed, result),
+                Event::CameraLook {
+                    id,
+                    generation,
+                    profile,
+                    result,
+                } if id == self.load.id() => self.camera_look_ready(generation, profile, result),
                 Event::Straighten {
                     id,
                     generation,

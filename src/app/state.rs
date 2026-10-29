@@ -67,6 +67,8 @@ pub(super) struct Document {
     pub(super) upright: super::task::Task,
     /// The Crop panel's Auto straighten analysis for this photo.
     pub(super) straighten: super::task::Task,
+    /// Profile → Fit Camera Look for this photo.
+    pub(super) camera_look: super::task::Task,
 }
 
 /// Where a photo's edit in Develop started from.
