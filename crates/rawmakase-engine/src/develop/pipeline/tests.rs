@@ -704,6 +704,56 @@ fn the_display_render_replays_the_stages_after_the_scene_stage() {
         assert_eq!(shown, color_stage(profile_stage(scene, &r), &r, &lut, None));
     }
 }
+/// A camera without colour data (no matrix, no profile) renders through no profile:
+/// its camera RGB as sRGB through a luminance shoulder, on the CPU only. Pinned so
+/// a fitted default (Camera Look) can only change it on purpose.
+#[test]
+fn a_camera_without_colour_data_renders_through_no_profile() {
+    let im = fixture();
+    let r = Recipe::with_profiles(&im.metadata, &[]);
+    assert!(r.profile.is_none());
+    assert!(!super::pixel_params::supported(&r));
+    let pro = mul(crate::camera_profiles::RGB_TO_PRO, [0.4, 0.2, 0.1]);
+    let out = profile_stage(pro, &r);
+    let y = crate::color::luminance([0.4, 0.2, 0.1]);
+    let k = 1. / (y + 0.82);
+    for (got, want) in out.iter().zip([0.4 * k, 0.2 * k, 0.1 * k]) {
+        assert!((got - want).abs() < 1e-5, "{out:?}");
+    }
+}
+/// The camera input stage is the decoder's samples times the white balance, through
+/// the render's geometry: bright channels keep what the sensor recorded, where
+/// highlight reconstruction pulls them (a fitted camera matrix must not learn it).
+#[test]
+fn the_camera_input_stage_is_before_highlight_reconstruction() -> anyhow::Result<()> {
+    let mut im = fixture();
+    im.pixels[13] = [0.8, 0.5, 0.4];
+    let r = Recipe {
+        wb: [1.5, 1., 0.8],
+        ..Default::default()
+    };
+    let camera = crate::develop::quality::render_stage(
+        &im,
+        &r,
+        crate::develop::quality::Stage::CameraInput,
+        &std::sync::atomic::AtomicBool::new(false),
+    )?;
+    assert_eq!([camera.width, camera.height], [12, 8]);
+    for (got, p) in camera.pixels.iter().zip(&im.pixels) {
+        let want: [f32; 3] = std::array::from_fn(|c| p[c] * r.wb[c]);
+        assert!(
+            got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-6),
+            "{got:?} {want:?}"
+        );
+    }
+    let recovered =
+        crate::develop::quality::recovered(&im, &std::sync::atomic::AtomicBool::new(false))?;
+    assert_ne!(
+        recovered.pixels[13], im.pixels[13],
+        "the bright colour is reconstructed"
+    );
+    Ok(())
+}
 /// The scene stage reads nothing computed after it: settings applied after the stage
 /// leave its output unchanged.
 #[test]
