@@ -7,10 +7,13 @@
 //! what [`HeicFile`]'s colour type and profile promise whatever colour ImageIO
 //! itself makes of the file: CoreGraphics converts them when the two differ.
 //! An HDR file's CICP (PQ or HLG, BT.2020) is drawn into CoreGraphics' own
-//! space of that name, the one it knows the transfer of; a profile that
-//! doesn't describe RGB, or that CoreGraphics can't read, is taken as sRGB,
-//! as RAWmakase takes it. Drawing copies rather than blends, so alpha leaves
-//! the colour as stored, as RAWmakase's own decoder does.
+//! space of that name, the one it knows the transfer of. A profile is used
+//! only when moxcms, which reads it for the rest of RAWmakase, finds it an RGB
+//! one, and CoreGraphics reads it as RGB too; otherwise the pixels are drawn
+//! as sRGB, as RAWmakase takes such a profile. An image with alpha comes out
+//! composited over black, as CoreGraphics premultiplies it (RAWmakase's own
+//! decoder ignores alpha and keeps the stored colour); photos rarely have
+//! any.
 //!
 //! The image ImageIO makes is not turned (RAWmakase turns it by the header's
 //! `irot` and `imir`); whether it is cropped by the `clap` or not, the caller
@@ -19,10 +22,11 @@
 use super::super::avif;
 use super::{HeicFile, Pixels};
 use anyhow::{Result, anyhow, ensure};
+use moxcms::{ColorProfile, DataColorSpace};
 use objc2::rc::autoreleasepool;
 use objc2_core_foundation::{CFData, CFRetained, CFString, CFURL, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGBlendMode, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
+    CGBitmapContextCreate, CGColorSpace, CGColorSpaceModel, CGContext, CGImage, CGImageAlphaInfo,
     CGImageByteOrderInfo, CGInterpolationQuality, kCGColorSpaceITUR_2100_HLG,
     kCGColorSpaceITUR_2100_PQ, kCGColorSpaceSRGB,
 };
@@ -33,8 +37,8 @@ pub(super) fn pixels(file: HeicFile) -> Result<Pixels> {
 }
 
 /// The colour space the header says: CoreGraphics' own for an HDR CICP in
-/// BT.2020, else the header's profile, and sRGB for none, one that isn't RGB
-/// or one CoreGraphics can't read.
+/// BT.2020, else the header's profile, and sRGB for none, or one that moxcms
+/// or CoreGraphics can't read as RGB.
 fn space(file: &HeicFile) -> Option<CFRetained<CGColorSpace>> {
     let named = |name: &CFString| CGColorSpace::with_name(Some(name));
     // SAFETY: constants CoreGraphics defines.
@@ -48,13 +52,18 @@ fn space(file: &HeicFile) -> Option<CFRetained<CGColorSpace>> {
     let space = match (&file.icc, file.nclx.map(|n| (n.primaries, n.transfer))) {
         (None, Some((9, 16))) => named(pq),
         (None, Some((9, 18))) => named(hlg),
-        _ => avif::profile(file.icc.as_ref(), file.nclx).and_then(|icc| {
-            // SAFETY: the data is a CFData, as the function takes.
-            unsafe { CGColorSpace::with_icc_data(Some(&CFData::from_bytes(&icc))) }
-        }),
+        _ => avif::profile(file.icc.as_ref(), file.nclx)
+            .filter(|icc| {
+                ColorProfile::new_from_slice(icc)
+                    .is_ok_and(|profile| profile.color_space == DataColorSpace::Rgb)
+            })
+            .and_then(|icc| {
+                // SAFETY: the data is a CFData, as the function takes.
+                unsafe { CGColorSpace::with_icc_data(Some(&CFData::from_bytes(&icc))) }
+            }),
     };
     space
-        .filter(|space| CGColorSpace::number_of_components(Some(space)) == 3)
+        .filter(|space| CGColorSpace::model(Some(space)) == CGColorSpaceModel::RGB)
         .or_else(|| named(srgb))
 }
 
@@ -97,7 +106,6 @@ fn decode(file: &HeicFile) -> Result<Pixels> {
     }
     .ok_or_else(failed)?;
     CGContext::set_interpolation_quality(Some(&context), CGInterpolationQuality::None);
-    CGContext::set_blend_mode(Some(&context), CGBlendMode::Copy);
     let size = CGSize::new(width as f64, height as f64);
     CGContext::draw_image(
         Some(&context),

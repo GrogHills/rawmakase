@@ -1341,6 +1341,12 @@ mod tests {
             // lossy 4:2:0's error.
             let centre = image.get_pixel(8, 6).0;
             assert!(centre.iter().all(|v| v.abs_diff(183) <= 6), "{centre:?}");
+        } else if cfg!(target_os = "macos") {
+            // ImageIO's HDR decoding is its own, but the grey is shown neither
+            // black nor clipped.
+            let image = decode(&fixture("pq.heic")).unwrap();
+            let centre = image.get_pixel(8, 6).0;
+            assert!(centre.iter().all(|v| (16..=250).contains(v)), "{centre:?}");
         }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sequence.heic");
