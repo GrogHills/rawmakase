@@ -24,6 +24,7 @@ use image::ImageDecoder;
 use image::metadata::Orientation;
 use rawmakase_interop::isobmff::{Heif, Property};
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use yuv::{YuvPlanarImage, YuvRange};
@@ -95,11 +96,11 @@ impl HeicFile {
         }
         let layout = match &primary.kind {
             b"hvc1" => {
-                let (config, (width, height)) = picture(&heif, heif.primary, false)?;
+                let (hvcc, (width, height)) = picture(&heif, heif.primary, false)?;
                 Layout {
                     width,
                     height,
-                    tiles: vec![(heif.primary, Arc::new(config))],
+                    tiles: vec![(heif.primary, Arc::new(config(hvcc)?))],
                     columns: 1,
                     tile: (width, height),
                 }
@@ -170,10 +171,21 @@ impl HeicFile {
         let batch = rayon::current_num_threads().max(1);
         // No more than the file holds either, however its extents overlap.
         let budget = coded_budget(tile.0, tile.1).min(self.file.metadata()?.len());
-        for (b, chunk) in tiles.chunks(batch).enumerate() {
+        // A tile listed more than once is decoded once, and laid at each of
+        // its places.
+        let mut distinct: Vec<(u32, &Arc<hevc::Config>, Vec<u32>)> = Vec::new();
+        let mut index = std::collections::HashMap::new();
+        for (at, (id, config)) in tiles.iter().enumerate() {
+            let i = *index.entry(*id).or_insert_with(|| {
+                distinct.push((*id, config, Vec::new()));
+                distinct.len() - 1
+            });
+            distinct[i].2.push(at as u32);
+        }
+        for chunk in distinct.chunks(batch) {
             let data = chunk
                 .iter()
-                .map(|(id, _)| {
+                .map(|(id, _, _)| {
                     self.heif
                         .data_up_to(&mut self.file, *id, budget)
                         .ok_or_else(|| {
@@ -184,9 +196,9 @@ impl HeicFile {
             let pictures: Vec<_> = chunk
                 .par_iter()
                 .zip(&data)
-                .map(|((_, config), data)| hevc::decode(config, data))
+                .map(|((_, config, _), data)| hevc::decode(config, data))
                 .collect();
-            for (i, picture) in pictures.into_iter().enumerate() {
+            for ((_, _, places), picture) in chunk.iter().zip(pictures) {
                 let picture = picture?;
                 ensure!(
                     (picture.width, picture.height) == *tile,
@@ -195,23 +207,24 @@ impl HeicFile {
                 if tiles.len() == 1 {
                     return Ok(picture);
                 }
-                let at = (b * batch + i) as u32;
                 let canvas = canvas.get_or_insert_with(|| blank(&picture, *width, *height));
-                place(
-                    canvas,
-                    &picture,
-                    at % columns * tile.0,
-                    at / columns * tile.1,
-                )?;
+                for at in places {
+                    place(
+                        canvas,
+                        &picture,
+                        at % columns * tile.0,
+                        at / columns * tile.1,
+                    )?;
+                }
             }
         }
         canvas.ok_or_else(|| anyhow!("The HEIF image has no tiles"))
     }
 }
 
-/// An `hvc1` item's configuration and size; the item may be a grid's `tile`,
-/// which may not be cropped or turned itself.
-fn picture(heif: &Heif, id: u32, tile: bool) -> Result<(hevc::Config, (u32, u32))> {
+/// An `hvc1` item's HEVC configuration (`hvcC`) and size; the item may be a
+/// grid's `tile`, which may not be cropped or turned itself.
+fn picture(heif: &Heif, id: u32, tile: bool) -> Result<(&[u8], (u32, u32))> {
     let item = heif
         .item(id)
         .ok_or_else(|| anyhow!("The HEIF image is missing a tile"))?;
@@ -239,14 +252,19 @@ fn picture(heif: &Heif, id: u32, tile: bool) -> Result<(hevc::Config, (u32, u32)
         })
         .filter(|(w, h)| *w > 0 && *h > 0)
         .ok_or_else(|| anyhow!("The HEIF image has no size"))?;
-    let config = props
+    let hvcc = props
         .iter()
         .find_map(|p| match p {
-            Property::HevcConfig(c) => hevc::Config::read(c),
+            Property::HevcConfig(c) => Some(c.as_slice()),
             _ => None,
         })
         .ok_or_else(|| anyhow!("The HEIF image has no HEVC configuration"))?;
-    Ok((config, size))
+    Ok((hvcc, size))
+}
+
+fn config(hvcc: &[u8]) -> Result<hevc::Config> {
+    hevc::Config::read(hvcc)
+        .ok_or_else(|| anyhow!("The HEIF image's HEVC configuration can't be read"))
 }
 
 /// A `grid` item (ISO/IEC 23008-12 6.6.2.3): its size, and its tiles, all of
@@ -278,12 +296,17 @@ fn grid(heif: &Heif, file: &mut std::fs::File) -> Result<Layout> {
         ids.len(),
         rows * columns
     );
-    // A grid may list a tile more than once; each is read once.
-    let mut read = std::collections::HashMap::new();
+    // A grid may list a tile more than once, and its tiles share one
+    // configuration as a rule: each tile and each configuration is read once.
+    let (mut read, mut configs) = (HashMap::new(), HashMap::new());
     for id in &ids {
         if !read.contains_key(id) {
-            let (config, size) = picture(heif, *id, true)?;
-            read.insert(*id, (Arc::new(config), size));
+            let (hvcc, size) = picture(heif, *id, true)?;
+            let parsed = match configs.get(hvcc) {
+                Some(parsed) => Arc::clone(parsed),
+                None => Arc::clone(configs.entry(hvcc).or_insert(Arc::new(config(hvcc)?))),
+            };
+            read.insert(*id, (parsed, size));
         }
     }
     let tile = read[&ids[0]].1;

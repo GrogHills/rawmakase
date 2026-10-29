@@ -15,6 +15,10 @@ use rust_h265::{Decoder, Frame, PixelData, parse_hvcc, parse_nal};
 /// again, so a larger one could make a small file of many tiles slow.
 const MAX_CONFIG: usize = 16 << 10;
 
+/// The most parameter sets and SEI an `hvcC` may hold: HEVC allows 16 VPS,
+/// 16 SPS and 64 PPS, and encoders write one of each.
+const MAX_PARAMETER_SETS: usize = 128;
+
 /// What an `hvcC` (ISO/IEC 14496-15 HEVCDecoderConfigurationRecord) says.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Config {
@@ -53,6 +57,9 @@ impl Config {
             let count = u16::from_be_bytes(take(2)?.try_into().ok()?);
             for _ in 0..count {
                 let len = u16::from_be_bytes(take(2)?.try_into().ok()?);
+                if parameter_sets.len() == MAX_PARAMETER_SETS {
+                    return None;
+                }
                 parameter_sets.push(take(len as usize)?.to_vec());
             }
         }
@@ -217,6 +224,10 @@ mod tests {
         let large = vec![0x4e; 0xffff];
         assert!(Config::read(&hvcc(&[&large[..MAX_CONFIG - 30]])).is_some());
         assert_eq!(Config::read(&hvcc(&[&large[..MAX_CONFIG]])), None);
+        // Nor one of more parameter sets than HEVC allows, however small.
+        let many = vec![&[0x40, 1][..]; MAX_PARAMETER_SETS + 1];
+        assert!(Config::read(&hvcc(&many[..MAX_PARAMETER_SETS])).is_some());
+        assert_eq!(Config::read(&hvcc(&many)), None);
     }
 
     #[test]
