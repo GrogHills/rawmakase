@@ -2,6 +2,19 @@
 # license notices of the Rust crates compiled into the shipped executable.
 # Every package generates it when it is built, with packaging/notices.py.
 
+# The platforms we ship, as in deny.toml (packaging/test_notices.py checks).
+# Every package lists the crates of all of them: the file is then the same
+# everywhere, and each clarification below is in the graph it is checked
+# against (cargo-about warns about one that is not).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+
 # The licenses deny.toml allows (packaging/test_notices.py keeps the two lists
 # the same), in order of preference: a crate offered under several is listed
 # under the first one here it accepts. MIT comes first, as it asks only that
@@ -26,7 +39,7 @@ accepted = [
 ]
 # Tests and benchmarks are not shipped.
 ignore-dev-dependencies = true
-# RAWmakase's own crates (publish = false); LICENSE ships beside the notices.
+# RAWmakase's own crates (all publish = false); LICENSE ships beside the notices.
 private = { ignore = true }
 
 # The crates below include their license text in a form cargo-about does not
@@ -93,6 +106,16 @@ license = "MIT OR Apache-2.0"
 files = [
     { path = "../../LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" },
     { path = "../../LICENSE-APACHE", license = "Apache-2.0", checksum = "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90" },
+]
+
+# The fonts' own licenses are beside them.
+[epaint_default_fonts.clarify]
+license = "(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0"
+files = [
+    { path = "../../LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" },
+    { path = "../../LICENSE-APACHE", license = "Apache-2.0", checksum = "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90" },
+    { path = "fonts/OFL.txt", license = "OFL-1.1", checksum = "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2" },
+    { path = "fonts/UFL.txt", license = "Ubuntu-font-1.0", checksum = "2f0015108d68627bd788d313f529c21ff4da2c2c42a5e1f3883acc83480f9002" },
 ]
 
 [epaint.clarify]

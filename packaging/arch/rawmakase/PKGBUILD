@@ -36,7 +36,10 @@ build() {
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo build --frozen --release
-  python packaging/notices.py --offline Cargo.toml "$srcdir/THIRD-PARTY-NOTICES.txt"
+  # The crates' notices; tags up to v0.4.8 have none.
+  if [[ -f packaging/notices.py ]]; then
+    python packaging/notices.py --offline Cargo.toml "$srcdir/THIRD-PARTY-NOTICES.txt"
+  fi
 }
 
 check() {
@@ -49,7 +52,9 @@ check() {
 package() {
   cd "rawmakase-$pkgver"
   make install DESTDIR="$pkgdir" PREFIX=/usr PKGNAME="$pkgname"
-  install -Dm644 "$srcdir/THIRD-PARTY-NOTICES.txt" "$pkgdir/usr/share/licenses/$pkgname/THIRD-PARTY-NOTICES.txt"
+  if [[ -f packaging/notices.py ]]; then
+    install -Dm644 "$srcdir/THIRD-PARTY-NOTICES.txt" "$pkgdir/usr/share/licenses/$pkgname/THIRD-PARTY-NOTICES.txt"
+  fi
   # The app opens the runtime lazily from /usr/lib/rawmakase
   # (crates/rawmakase-inference/src/runtime.rs); nothing links it.
   local ort="$srcdir/onnxruntime-linux-${CARCH/x86_64/x64}-$_ortver"

@@ -199,12 +199,16 @@ from `licenses/`: the copyright and license notices of the Rust crates built
 into the executable, which their MIT, Apache-2.0 and BSD licenses require to
 ship with it. `packaging/notices.py` writes it with
 [cargo-about](https://github.com/EmbarkStudios/cargo-about) when the package is
-built, from the Cargo.lock of the source being packaged (the release jobs pass
-`release-source/Cargo.toml`) and for the build's own target, using
-`packaging/about.toml` and `packaging/notices.hbs`. The release jobs install
-cargo-about 0.9.3 with `cargo install`; the Arch recipes take Arch's
-`cargo-about` package. It reads license files only from the crates' sources, so
-the same lockfile always gives the same file, and any warning fails the build.
+built, from the source being packaged (the release jobs pass
+`release-source/Cargo.toml`) with that source's `packaging/about.toml` and
+`packaging/notices.hbs`, so a rebuild of a tag from before the notices
+(v0.4.8 and earlier) packages it without them, as it was released. It lists the
+crates of every platform in deny.toml's `targets`, so every package carries the
+same file, and the Arch build that CI runs on each pull request checks the
+whole configuration, macOS and Windows crates included. The release jobs install cargo-about 0.9.3
+with `cargo install`; the Arch recipes take Arch's `cargo-about` package. It
+reads license files only from the crates' sources, so the same lockfile always
+gives the same file, and any warning fails the build.
 A crate that does not ship its license file in a recognised form gets a
 checksum-pinned clarification in `about.toml`; when a dependency update changes
 a pinned file, check the new text and update the checksum. Crates published

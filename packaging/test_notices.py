@@ -10,20 +10,28 @@ import notices
 
 ROOT = Path(__file__).resolve().parents[1]
 RECIPES = [ROOT / "packaging/arch" / name / "PKGBUILD" for name in ("rawmakase", "rawmakase-git")]
+CONFIG = tomllib.loads((ROOT / "packaging/about.toml").read_text())
+DENY = tomllib.loads((ROOT / "deny.toml").read_text())
 
 
-class LicenseListTests(unittest.TestCase):
+class ConfigTests(unittest.TestCase):
     def test_notices_accept_exactly_the_licenses_cargo_deny_allows(self):
-        accepted = tomllib.loads(notices.CONFIG.read_text())["accepted"]
-        allowed = tomllib.loads((ROOT / "deny.toml").read_text())["licenses"]["allow"]
+        accepted = CONFIG["accepted"]
         self.assertEqual(len(accepted), len(set(accepted)))
-        self.assertEqual(set(accepted), set(allowed))
+        self.assertEqual(set(accepted), set(DENY["licenses"]["allow"]))
+
+    def test_notices_cover_the_platforms_cargo_deny_audits(self):
+        self.assertEqual(CONFIG["targets"], DENY["graph"]["targets"])
 
 
 class GenerateTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
+        self.source = Path(temporary.name, "source")
+        (self.source / "packaging").mkdir(parents=True)
+        (self.source / "packaging/about.toml").touch()
+        self.manifest = self.source / "Cargo.toml"
         self.output = Path(temporary.name) / notices.NAME
         self.calls = []
 
@@ -33,22 +41,32 @@ class GenerateTests(unittest.TestCase):
             if command[:2] == ["cargo", "about"]:
                 self.output.write_text("notices")
             return subprocess.CompletedProcess(command, returncode, stderr=stderr)
-        host = "rustc 1.98.1\nhost: aarch64-apple-darwin\nrelease: 1.98.1\n"
-        with patch("notices.subprocess.run", side_effect=run), \
-                patch("notices.subprocess.check_output", return_value=host):
-            notices.generate("source/Cargo.toml", self.output, offline)
+        with patch("notices.subprocess.run", side_effect=run):
+            return notices.generate(self.manifest, self.output, offline)
 
-    def test_fetches_every_platform_then_reads_only_local_sources_for_the_host(self):
-        self.generate()
+    def test_fetches_every_platform_then_reads_only_local_sources(self):
+        self.assertTrue(self.generate())
         fetch, about = self.calls
-        self.assertEqual(fetch, ["cargo", "fetch", "--locked", "--manifest-path", "source/Cargo.toml"])
+        self.assertEqual(fetch, ["cargo", "fetch", "--locked", "--manifest-path", str(self.manifest)])
         self.assertEqual(about[:3], ["cargo", "about", "generate"])
         self.assertIn("--frozen", about)
-        self.assertEqual(about[about.index("--manifest-path") + 1], "source/Cargo.toml")
-        self.assertEqual(about[about.index("--target") + 1], "aarch64-apple-darwin")
-        self.assertEqual(about[about.index("--config") + 1], str(notices.CONFIG))
-        self.assertEqual(about[-1], str(notices.TEMPLATE))
+        self.assertIn("--fail", about)
+        self.assertEqual(about[about.index("--manifest-path") + 1], str(self.manifest))
         self.assertEqual(self.output.read_text(), "notices")
+
+    def test_configuration_comes_from_the_packaged_source(self):
+        self.generate()
+        about = self.calls[-1]
+        self.assertEqual(about[about.index("--config") + 1], str(self.source / "packaging/about.toml"))
+        self.assertEqual(about[-1], str(self.source / "packaging/notices.hbs"))
+        # Its targets, not the host's alone.
+        self.assertNotIn("--target", about)
+
+    def test_a_source_from_before_the_notices_is_packaged_without_them(self):
+        (self.source / "packaging/about.toml").unlink()
+        self.assertFalse(self.generate())
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.output.exists())
 
     def test_offline_does_not_fetch(self):
         self.generate(offline=True)
@@ -77,8 +95,13 @@ class ArchRecipeTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.src = Path(temporary.name, "src")
         self.pkg = Path(temporary.name, "pkg")
-        (self.src / "rawmakase").mkdir(parents=True)
-        (self.src / "rawmakase-0").mkdir()
+        for checkout in ("rawmakase", "rawmakase-0"):
+            (self.src / checkout / "packaging").mkdir(parents=True)
+            (self.src / checkout / "packaging/notices.py").touch()
+
+    def without_notices(self):
+        for checkout in ("rawmakase", "rawmakase-0"):
+            (self.src / checkout / "packaging/notices.py").unlink()
 
     def recipe(self, recipe, script):
         return subprocess.run(["bash", "-c", f'source "$1"; pkgver=0; CARCH=x86_64; srcdir={self.src}; '
@@ -97,18 +120,29 @@ class ArchRecipeTests(unittest.TestCase):
                 built = self.recipe(recipe, 'cargo() { :; }; python() { echo "$@"; }; build')
                 self.assertEqual(built, [f"packaging/notices.py --offline Cargo.toml {self.src}/{notices.NAME}"])
 
-    def test_package_installs_the_notices(self):
-        (self.src / notices.NAME).write_text("notices")
+    def package(self, recipe):
         # The ONNX Runtime archive makepkg extracts beside the source.
         runtime = self.src / "onnxruntime-linux-x64-1.23.2"
         for path in ("lib/libonnxruntime.so.1.23.2", "LICENSE", "ThirdPartyNotices.txt"):
             (runtime / path).parent.mkdir(parents=True, exist_ok=True)
             (runtime / path).write_text("")
+        self.recipe(recipe, '_ortver=1.23.2; make() { :; }; package')
+        return self.pkg / "usr/share/licenses" / recipe.parent.name
+
+    def test_package_installs_the_notices(self):
+        (self.src / notices.NAME).write_text("notices")
         for recipe in RECIPES:
             with self.subTest(recipe=recipe.parent.name):
-                self.recipe(recipe, '_ortver=1.23.2; make() { :; }; package')
-                licenses = self.pkg / "usr/share/licenses" / recipe.parent.name
-                self.assertEqual((licenses / notices.NAME).read_text(), "notices")
+                self.assertEqual((self.package(recipe) / notices.NAME).read_text(), "notices")
+
+    def test_a_tag_from_before_the_notices_builds_and_packages_without_them(self):
+        self.without_notices()
+        for recipe in RECIPES:
+            with self.subTest(recipe=recipe.parent.name):
+                self.assertEqual(self.recipe(recipe, 'cargo() { :; }; python() { echo "$@"; }; build'), [])
+                licenses = self.package(recipe)
+                self.assertTrue((licenses / "onnxruntime-LICENSE").exists())
+                self.assertFalse((licenses / notices.NAME).exists())
 
 
 if __name__ == "__main__":

@@ -4,7 +4,8 @@
 # The platforms we ship: the two Linux packages, both macOS architectures and
 # both Windows installers. Windows and macOS crates are target-specific, so leaving
 # their targets out drops four windows-sys versions and the objc2 bindings from
-# the graph and audits nothing for those builds.
+# the graph and audits nothing for those builds. packaging/about.toml, which
+# writes the shipped crate notices, lists the same targets.
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
@@ -24,7 +25,7 @@ yanked = "deny"
 [licenses]
 # Permissive licenses, plus the OFL/Ubuntu font licenses of egui's bundled default fonts
 # and CC0 (public domain) for notify, which fastframe-theme uses to follow Omarchy.
-# packaging/about.toml, which writes the shipped crate notices, accepts the same list.
+# packaging/about.toml accepts the same list.
 allow = [
     "0BSD",
     "Apache-2.0",
