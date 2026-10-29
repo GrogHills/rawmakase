@@ -20,7 +20,11 @@ pub struct Dng {
     pub user_crop: Option<[f32; 4]>,
     /// The profile tags, rewritten as a standalone DCP: the embedded camera
     /// profile when they make one, else at least the file's colour matrices.
+    /// `None` when IFD0 has no colour tags (colour or forward matrices, tables).
     pub profile: Option<Vec<u8>>,
+    /// Profile tags are there but one could not be read (an offset past the end):
+    /// `profile` is then `None`, which must not read as no profile.
+    pub profile_unreadable: bool,
     pub lens: Option<LensCorrection>,
 }
 
@@ -47,13 +51,15 @@ pub fn read(path: &Path) -> Option<Dng> {
     let mut t = Tiff::open(File::open(path).ok()?, 0)?;
     let ifd0 = t.ifd(t.first)?;
     ifd0.get(&50706)?; // DNGVersion
+    let profile = profile_tags(&mut t, &ifd0);
     let mut dng = Dng {
         baseline_exposure: ifd0
             .get(&50730)
             .and_then(|e| t.numbers(e))
             .and_then(|v| v.first().copied())
             .filter(|v| v.is_finite() && v.abs() <= 5.),
-        profile: profile_tags(&mut t, &ifd0),
+        profile_unreadable: profile.is_err(),
+        profile: profile.unwrap_or_default(),
         profile_calibration_signature: ifd0
             .get(&50932)
             .and_then(|entry| String::from_utf8(t.raw(entry)?).ok())
@@ -201,14 +207,21 @@ fn constant_diagonal(a: &[f32], b: &[f32], analog: &[f32]) -> Option<[f32; 3]> {
         .then_some(gains)
 }
 
+/// Tags that give a profile colour: colour and forward matrices and tables.
+const COLOUR_TAGS: &[u16] = &[50721, 50722, 50938, 50939, 50964, 50965, 50982];
+
 /// Rewrites the profile tags as a standalone DCP so the regular parser validates them.
 /// Returns the bytes rather than a profile, since the matrix is readable from
-/// them even when the profile itself is not.
-fn profile_tags(t: &mut Tiff, ifd0: &BTreeMap<u16, Entry>) -> Option<Vec<u8>> {
+/// them even when the profile itself is not; `None` without colour tags, an error
+/// when a tag that is there can't be read.
+fn profile_tags(t: &mut Tiff, ifd0: &BTreeMap<u16, Entry>) -> Result<Option<Vec<u8>>, ()> {
+    if !COLOUR_TAGS.iter().any(|tag| ifd0.contains_key(tag)) {
+        return Ok(None);
+    }
     let mut entries = Vec::new();
     for tag in PROFILE_TAGS {
         if let Some(e) = ifd0.get(tag) {
-            entries.push((*tag, e.kind, e.count, t.raw(e)?));
+            entries.push((*tag, e.kind, e.count, t.raw(e).ok_or(())?));
         }
     }
     let le = t.little;
@@ -239,7 +252,7 @@ fn profile_tags(t: &mut Tiff, ifd0: &BTreeMap<u16, Entry>) -> Option<Vec<u8>> {
     }
     out.extend(u32b(0));
     out.extend(data);
-    Some(out)
+    Ok(Some(out))
 }
 
 /// Parameters of the first opcode with `id` in a big-endian DNG opcode list.

@@ -198,6 +198,7 @@ pub(crate) fn open(t: TiffFile) -> Result<RawInfo> {
     {
         let daylight = [r / g * red, 1., b / g * blue];
         info.file_matrix = crate::color::cam_xyz_of(m, daylight);
+        info.file_matrix_source = crate::info::MatrixSource::MakerNote;
     }
     info.plan = Plan::Orf(OrfPlan {
         offset: t.base + u64::from(offset),
