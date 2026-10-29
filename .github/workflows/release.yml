@@ -116,10 +116,12 @@ jobs:
           rustup default 1.98.1
           toolchain_bin=$(dirname "$(rustup which --toolchain 1.98.1 rustc)")
           echo "$toolchain_bin" >> "$GITHUB_PATH"
+          # Writes the crates' notices (packaging/notices.py).
+          cargo install cargo-about --version 0.9.3 --features cli --locked
       - name: Build and stage portable payload
         run: |
           cargo build --release --locked --manifest-path release-source/Cargo.toml --target-dir "$GITHUB_WORKSPACE/target"
-          python3 packaging/linux/bundle.py target/release/rawmakase dist/linux-root
+          python3 packaging/linux/bundle.py target/release/rawmakase dist/linux-root --manifest-path release-source/Cargo.toml
           mkdir -p dist/upload
           tar -C dist/linux-root -czf "dist/upload/rawmakase-$VERSION-$ARCH-linux.tar.gz" usr
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -140,7 +142,7 @@ jobs:
     steps:
       - name: Dependencies
         run: >-
-          pacman -Syu --noconfirm --needed rust git pkgconf
+          pacman -Syu --noconfirm --needed rust cargo-about python git pkgconf
           hicolor-icon-theme libxkbcommon vulkan-icd-loader wayland namcap
           libxkbcommon-x11 libx11 libxcb libxcursor libxi libxrandr libglvnd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -245,8 +247,10 @@ jobs:
           rustup default 1.98.1
           toolchain_bin=$(dirname "$(rustup which --toolchain 1.98.1 rustc)")
           export PATH="$toolchain_bin:$PATH"
+          # Writes the crates' notices (packaging/notices.py).
+          cargo install cargo-about --version 0.9.3 --features cli --locked
           cargo build --release --locked --manifest-path release-source/Cargo.toml --target-dir "$GITHUB_WORKSPACE/target"
-          python3 packaging/macos/bundle.py target/release/rawmakase dist/RAWmakase.app "$VERSION" --minimum-macos "$MACOSX_DEPLOYMENT_TARGET" --icon-assets compiled-icon/Assets.car
+          python3 packaging/macos/bundle.py target/release/rawmakase dist/RAWmakase.app "$VERSION" --minimum-macos "$MACOSX_DEPLOYMENT_TARGET" --icon-assets compiled-icon/Assets.car --manifest-path release-source/Cargo.toml
           # A tar keeps the bundle's symlinks and permissions through the artifact.
           tar -C dist -cf "$RUNNER_TEMP/RAWmakase.app.tar" RAWmakase.app
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -372,8 +376,10 @@ jobs:
           rustup toolchain install 1.98.1 --profile minimal
           rustup default 1.98.1
           packaging/windows/toolchain.ps1
+          # Writes the crates' notices (packaging/notices.py).
+          cargo install cargo-about --version 0.9.3 --features cli --locked
           cargo build --release --locked --manifest-path release-source/Cargo.toml --target-dir "$env:GITHUB_WORKSPACE\target"
-          packaging/windows/stage.ps1 target\release\rawmakase.exe dist\windows
+          packaging/windows/stage.ps1 target\release\rawmakase.exe dist\windows release-source\Cargo.toml
       - if: steps.source.outputs.windows == 'true'
         uses: ruby/setup-ruby@b1da4809b005e0178fe08a1d57317bffc00b7b4c # v1
         with:

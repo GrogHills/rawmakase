@@ -465,6 +465,7 @@ the validation docs.
 | [packaging/macos/app.sh](../packaging/macos/app.sh), [Info.plist](../packaging/macos/Info.plist) | Local Finder-launchable macOS bundle and its metadata. |
 | [rawmakase.desktop](../packaging/applications/rawmakase.desktop), [rawmakase.svg](../packaging/icons/rawmakase.svg) | Linux launcher and application icon. |
 | [LICENSE](../LICENSE), [Adobe notice](../licenses/Adobe-DNG-SDK.txt) | Project licensing and third-party DNG attribution. |
+| [packaging/notices.py](../packaging/notices.py), [about.toml](../packaging/about.toml), [notices.hbs](../packaging/notices.hbs) | The shipped `THIRD-PARTY-NOTICES.txt`: the Rust crates' copyright and license notices, written with cargo-about when each package is built. |
 | [README](../README.md) | Build/run instructions, controls, CLI examples and supported scope. |
 | [Architecture](architecture.md) | Module ownership, state/thread invariants and compatibility rules. |
 | [Catalogs](catalogs.md) | Catalog use, import preservation, relinking, schema and preview cache. |

@@ -36,6 +36,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--manifest-path", type=Path, required=True,
+                        help="Cargo.toml of the source the binary was built from")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     stage = args.output.resolve()
@@ -59,6 +61,9 @@ def main():
                            (root / "packaging/icons/rawmakase.svg", stage / "usr/share/icons/hicolor/scalable/apps/rawmakase.svg")]:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+    sys.path.insert(0, str(root / "packaging"))
+    import notices
+    notices.generate(args.manifest_path, licenses / notices.NAME)
     # These are supplied by the supported distribution, including its GPU stack.
     host = re.compile(r"^(lib(c|m|dl|pthread|rt|resolv|util|gcc_s|stdc\+\+|z|"
                       r"vulkan|xkbcommon|xkbcommon-x11|wayland-client|wayland-cursor|wayland-egl|"
@@ -94,7 +99,6 @@ def main():
     (licenses / "ubuntu-libraries.json").write_text(json.dumps(records, indent=2) + "\n")
     # The ONNX Runtime that runs the subject selection model, opened lazily from
     # beside the executable; the app starts without it.
-    sys.path.insert(0, str(root / "packaging"))
     import onnxruntime
     onnxruntime.fetch("linux", platform.machine(), private, licenses)
     for path in private.iterdir():

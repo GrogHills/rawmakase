@@ -194,6 +194,24 @@ Linux bundles any library outside the host's core OS/C++/zlib/graphics set
 with its notice (today none but ONNX Runtime). Application source is attached
 to the release.
 
+Every package carries `THIRD-PARTY-NOTICES.txt` beside `LICENSE` and the files
+from `licenses/`: the copyright and license notices of the Rust crates built
+into the executable, which their MIT, Apache-2.0 and BSD licenses require to
+ship with it. `packaging/notices.py` writes it with
+[cargo-about](https://github.com/EmbarkStudios/cargo-about) when the package is
+built, from the Cargo.lock of the source being packaged (the release jobs pass
+`release-source/Cargo.toml`) and for the build's own target, using
+`packaging/about.toml` and `packaging/notices.hbs`. The release jobs install
+cargo-about 0.9.3 with `cargo install`; the Arch recipes take Arch's
+`cargo-about` package. It reads license files only from the crates' sources, so
+the same lockfile always gives the same file, and any warning fails the build.
+A crate that does not ship its license file in a recognised form gets a
+checksum-pinned clarification in `about.toml`; when a dependency update changes
+a pinned file, check the new text and update the checksum. Crates published
+with no license file at all are listed with the license's generic text and the
+authors their manifests name. The accepted licenses are deny.toml's
+(`packaging/test_notices.py` checks), preferring MIT for dual-licensed crates.
+
 Windows builds with MSVC. Windows builds link the C runtime statically
 (`.cargo/config.toml`), so `rawmakase.exe` imports only Windows' own DLLs: the
 updater runs a copy of it alone as its helper. `packaging/windows/stage.ps1`

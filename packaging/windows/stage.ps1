@@ -1,13 +1,15 @@
-# Stages the Windows payload: the executable and the licenses. The C runtime
+# Stages the Windows payload: the executable and the licenses, with the notices
+# of the crates built into it from the source Cargo.toml names. The C runtime
 # is linked in, so no Visual C++ Redistributable is needed.
 #
-#   pwsh packaging/windows/stage.ps1 target\release\rawmakase.exe dist\windows
+#   pwsh packaging/windows/stage.ps1 target\release\rawmakase.exe dist\windows Cargo.toml
 #
 # Fails the build if the executable imports any DLL that is not part of Windows.
 # Stages natively for this Windows' architecture: x64 or ARM64.
 param(
     [Parameter(Mandatory)][string]$Executable,
-    [Parameter(Mandatory)][string]$Output
+    [Parameter(Mandatory)][string]$Output,
+    [Parameter(Mandatory)][string]$Manifest
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
@@ -20,6 +22,7 @@ Copy-Item $Executable (Join-Path $Output 'rawmakase.exe')
 Copy-Item (Join-Path $root 'LICENSE'), (Join-Path $root 'README.md') $Output
 $licenses = New-Item -ItemType Directory (Join-Path $Output 'licenses')
 Copy-Item (Join-Path $root 'licenses\*') $licenses
+python (Join-Path $root 'packaging\notices.py') $Manifest (Join-Path $licenses 'THIRD-PARTY-NOTICES.txt')
 
 # The ONNX Runtime that runs the subject selection model, opened lazily from beside
 # the executable; rawmakase.exe does not import it, so the updater's helper copy

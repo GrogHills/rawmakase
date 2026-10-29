@@ -133,8 +133,10 @@ jobs:
       - name: Build and stage app
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
+          # Writes the crates' notices (packaging/notices.py).
+          cargo install cargo-about --version 0.9.3 --features cli --locked
           cargo build --release --locked
-          packaging/windows/stage.ps1 target\release\rawmakase.exe dist\windows
+          packaging/windows/stage.ps1 target\release\rawmakase.exe dist\windows Cargo.toml
       - uses: ruby/setup-ruby@b1da4809b005e0178fe08a1d57317bffc00b7b4c # v1
         with:
           ruby-version: ${{ matrix.ruby }}

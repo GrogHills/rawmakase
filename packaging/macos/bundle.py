@@ -59,6 +59,8 @@ def main():
     parser.add_argument("--minimum-macos", default="15.0")
     parser.add_argument("--icon-assets", type=Path,
                         help="Assets.car compiled on macOS 26 for the layered app icon")
+    parser.add_argument("--manifest-path", type=Path, required=True,
+                        help="Cargo.toml of the source the binary was built from")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     app = args.output.resolve()
@@ -80,6 +82,9 @@ def main():
     shutil.copy2(root / "licenses/NotoEmoji-OFL.txt", notices)
     shutil.copy2(root / "licenses/Ubuntu-UFL.txt", notices)
     shutil.copy2(root / "licenses/emoji-icon-font-MIT.txt", notices)
+    sys.path.insert(0, str(root / "packaging"))
+    import notices as third_party
+    third_party.generate(args.manifest_path, notices / third_party.NAME)
 
     # Resolve the original dependency graph before rewriting any load commands.
     copies = {args.binary.resolve(): executable}
@@ -121,7 +126,6 @@ def main():
     # The ONNX Runtime that runs the subject selection model, opened lazily from
     # here; it is signed with the rest, which hardened-runtime library validation
     # requires of anything the app loads.
-    sys.path.insert(0, str(root / "packaging"))
     import onnxruntime
     runtime = onnxruntime.fetch("macos", run("lipo", "-archs", str(args.binary)).split()[0],
                                 frameworks, notices)

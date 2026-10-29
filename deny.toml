@@ -24,6 +24,7 @@ yanked = "deny"
 [licenses]
 # Permissive licenses, plus the OFL/Ubuntu font licenses of egui's bundled default fonts
 # and CC0 (public domain) for notify, which fastframe-theme uses to follow Omarchy.
+# packaging/about.toml, which writes the shipped crate notices, accepts the same list.
 allow = [
     "0BSD",
     "Apache-2.0",

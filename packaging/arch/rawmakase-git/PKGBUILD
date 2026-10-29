@@ -11,7 +11,7 @@ url='https://github.com/pch/rawmakase'
 license=('MIT')
 depends=('gcc-libs' 'glibc' 'hicolor-icon-theme' 'libxkbcommon' 'libxkbcommon-x11' 'vulkan-icd-loader' 'wayland' 'libx11' 'libxcb' 'libxcursor' 'libxi' 'libxrandr' 'libglvnd')
 optdepends=('xdg-desktop-portal: native file dialogs')
-makedepends=('cargo' 'git' 'pkgconf')
+makedepends=('cargo' 'cargo-about' 'git' 'pkgconf' 'python')
 # makepkg's LTO flags turn bundled C code (SQLite) into GCC bytecode rustc
 # cannot link.
 options=('!lto' '!debug')
@@ -35,7 +35,8 @@ pkgver() {
 prepare() {
   cd "rawmakase"
   export RUSTUP_TOOLCHAIN=stable
-  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+  # Every platform's crates: the notices' cargo-about reads the whole lockfile.
+  cargo fetch --locked
 }
 
 build() {
@@ -43,6 +44,7 @@ build() {
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo build --frozen --release
+  python packaging/notices.py --offline Cargo.toml "$srcdir/THIRD-PARTY-NOTICES.txt"
 }
 
 check() {
@@ -55,6 +57,7 @@ check() {
 package() {
   cd "rawmakase"
   make install DESTDIR="$pkgdir" PREFIX=/usr PKGNAME="$pkgname"
+  install -Dm644 "$srcdir/THIRD-PARTY-NOTICES.txt" "$pkgdir/usr/share/licenses/$pkgname/THIRD-PARTY-NOTICES.txt"
   # The app opens the runtime lazily from /usr/lib/rawmakase
   # (crates/rawmakase-inference/src/runtime.rs); nothing links it.
   local ort="$srcdir/onnxruntime-linux-${CARCH/x86_64/x64}-$_ortver"

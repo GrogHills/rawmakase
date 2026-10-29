@@ -1,0 +1,174 @@
+# cargo-about configuration for THIRD-PARTY-NOTICES.txt, the copyright and
+# license notices of the Rust crates compiled into the shipped executable.
+# Every package generates it when it is built, with packaging/notices.py.
+
+# The licenses deny.toml allows (packaging/test_notices.py keeps the two lists
+# the same), in order of preference: a crate offered under several is listed
+# under the first one here it accepts. MIT comes first, as it asks only that
+# the copyright and permission notice be kept.
+accepted = [
+    "MIT",
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# Tests and benchmarks are not shipped.
+ignore-dev-dependencies = true
+# RAWmakase's own crates (publish = false); LICENSE ships beside the notices.
+private = { ignore = true }
+
+# The crates below include their license text in a form cargo-about does not
+# recognise, or only at the root of their repository. Each file is pinned by
+# its SHA-256, so a changed license fails generation (cargo-about only warns;
+# packaging/notices.py fails on any warning) instead of falling back to the
+# license's generic text: check the new text, then update the checksum.
+# A crate published with no license file at all is listed with the generic
+# text and the authors its manifest names.
+
+# eframe and egui, from the fork that [patch.crates-io] in Cargo.toml selects.
+# Its license files are at the root of the repository, two levels up.
+[ecolor.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "../../LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" },
+    { path = "../../LICENSE-APACHE", license = "Apache-2.0", checksum = "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90" },
+]
+
+[eframe.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "../../LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" },
+    { path = "../../LICENSE-APACHE", license = "Apache-2.0", checksum = "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90" },
+]
+
+[egui.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "../../LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" },
+    { path = "../../LICENSE-APACHE", license = "Apache-2.0", checksum = "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90" },
+]
+
+[egui-wgpu.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "../../LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" },
+    { path = "../../LICENSE-APACHE", license = "Apache-2.0", checksum = "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90" },
+]
+
+[egui-winit.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "../../LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" },
+    { path = "../../LICENSE-APACHE", license = "Apache-2.0", checksum = "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90" },
+]
+
+[egui_extras.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "../../LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" },
+    { path = "../../LICENSE-APACHE", license = "Apache-2.0", checksum = "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90" },
+]
+
+[egui_glow.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "../../LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" },
+    { path = "../../LICENSE-APACHE", license = "Apache-2.0", checksum = "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90" },
+]
+
+[emath.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "../../LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" },
+    { path = "../../LICENSE-APACHE", license = "Apache-2.0", checksum = "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90" },
+]
+
+[epaint.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "../../LICENSE-MIT", license = "MIT", checksum = "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c" },
+    { path = "../../LICENSE-APACHE", license = "Apache-2.0", checksum = "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90" },
+]
+
+# fastframe, from git, with its license at the root of the repository.
+[fastframe-desktop.clarify]
+license = "MIT"
+files = [{ path = "../../LICENSE", checksum = "bb88b08f452b933a9e7cd83abc7f009a8e298e41dfc9bca9d6e50f0435b2fa43" }]
+
+[fastframe-dirs.clarify]
+license = "MIT"
+files = [{ path = "../../LICENSE", checksum = "bb88b08f452b933a9e7cd83abc7f009a8e298e41dfc9bca9d6e50f0435b2fa43" }]
+
+[fastframe-fonts.clarify]
+license = "MIT AND OFL-1.1"
+files = [
+    { path = "../../LICENSE", license = "MIT", checksum = "bb88b08f452b933a9e7cd83abc7f009a8e298e41dfc9bca9d6e50f0435b2fa43" },
+    { path = "fonts/Inter-LICENSE.txt", license = "OFL-1.1", checksum = "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a" },
+]
+
+[fastframe-icons.clarify]
+license = "MIT AND ISC"
+files = [
+    { path = "../../LICENSE", license = "MIT", checksum = "bb88b08f452b933a9e7cd83abc7f009a8e298e41dfc9bca9d6e50f0435b2fa43" },
+    { path = "icons/lucide/LICENSE.txt", license = "ISC", checksum = "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57" },
+]
+
+[fastframe-text.clarify]
+license = "MIT"
+files = [{ path = "../../LICENSE", checksum = "bb88b08f452b933a9e7cd83abc7f009a8e298e41dfc9bca9d6e50f0435b2fa43" }]
+
+[fastframe-theme.clarify]
+license = "MIT"
+files = [{ path = "../../LICENSE", checksum = "bb88b08f452b933a9e7cd83abc7f009a8e298e41dfc9bca9d6e50f0435b2fa43" }]
+
+[fastframe-titlebar.clarify]
+license = "MIT"
+files = [{ path = "../../LICENSE", checksum = "bb88b08f452b933a9e7cd83abc7f009a8e298e41dfc9bca9d6e50f0435b2fa43" }]
+
+[fastframe-update.clarify]
+license = "MIT"
+files = [{ path = "../../LICENSE", checksum = "bb88b08f452b933a9e7cd83abc7f009a8e298e41dfc9bca9d6e50f0435b2fa43" }]
+
+# One file holding both licenses, after a copyright header.
+[chrono.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "LICENSE.txt", license = "MIT", checksum = "946c9835d8034d24404f8cfec5f4654cee5dad17e944afc3d06d742cf2882831" }]
+
+# The MIT license, followed by the musl and CORE-MATH notices.
+[libm.clarify]
+license = "MIT"
+files = [{ path = "LICENSE.txt", checksum = "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7" }]
+
+# Offered as BSD-3-Clause OR MIT, with only the BSD text: used under BSD-3-Clause.
+[brotli-decompressor.clarify]
+license = "BSD-3-Clause"
+files = [{ path = "LICENSE", checksum = "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae" }]
+
+# Apache-2.0, after a note on the project's relicensing from MIT.
+[rmcp.clarify]
+license = "Apache-2.0"
+files = [{ path = "LICENSE", checksum = "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a" }]
+
+[rmcp-macros.clarify]
+license = "Apache-2.0"
+files = [{ path = "LICENSE", checksum = "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a" }]
+
+# The MIT text, rewrapped below the matcher's threshold.
+[type-map.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "b47fb719a40d9ef9c8e3be525c41ce129c46d613cfc96a91bddd7c19dcebf7a1" },
+    { path = "LICENSE-APACHE", license = "Apache-2.0", checksum = "f70ebc7cddd5befd46ce2aa9a8782deb7b59ac9fd55e8c0e10647d1ac66cecd1" },
+]
