@@ -199,6 +199,8 @@ The [usage stats service](stats/README.md) in `stats/` still counts reports from
 make check    # cargo fmt --check, clippy -D warnings, cargo test
 ```
 
+To try a build without touching your own library, run it in a sandbox: `scripts/sandbox.sh --sample ~/Pictures --limit 300` builds a release, copies 300 photos (with their sidecars) from the sample folder, and launches the app with its own `HOME` and data folder under `~/rawmakase-sandbox` (`RAWMAKASE_SANDBOX` moves it). Add the sandbox's `photos` folder in the Library on first launch; run the script without `--sample` to open the same sandbox again, or with `--reset` to start over. The sample folder is only read.
+
 The repository contains no RAW photos, Lightroom catalogs or camera profiles, so tests that need them are ignored by default. Run them with your own files:
 
 | Environment variable | Test target | Needs |
