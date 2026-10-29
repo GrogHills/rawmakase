@@ -124,6 +124,8 @@ make install PREFIX="$HOME/.local"    # binary, desktop entry, icon and licenses
 
 `make install` never builds, so `make && sudo make install PREFIX=/usr` does not compile as root. `make uninstall` removes the installed files.
 
+HEIC photos are decoded by RAWmakase's own HEVC decoder. HEVC is patented, and some distributions leave software HEVC decoders out: `make CARGO_FLAGS=--no-default-features` builds without it, and HEIF photos are then listed, with their metadata, but not shown or edited (see [dependencies](docs/dependencies.md)).
+
 On macOS, `packaging/macos/app.sh` builds `target/release/RAWmakase.app`, which you can open from Finder. It uses the Homebrew libraries installed on your Mac and is not a signed, self-contained distribution.
 
 ## Usage

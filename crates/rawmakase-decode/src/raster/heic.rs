@@ -1,5 +1,10 @@
 //! A HEIC (a HEIF of HEVC) still: our reading of its container
-//! ([`rawmakase_interop::isobmff`]) here, its pixels decoded by [`software`].
+//! ([`rawmakase_interop::isobmff`]) here, its pixels decoded by RAWmakase's own
+//! decoder (`software`).
+//!
+//! A build without the decoder (without the `software-hevc` feature, for
+//! packagers who leave software HEVC decoders out) reads the header, so the
+//! photo is listed with its size and metadata, but refuses its pixels.
 //!
 //! A phone's photo is a grid (`grid`) of tiles, 512×512 on an iPhone, each its
 //! own HEVC picture. A clean aperture (`clap`) crops the picture, before its
@@ -21,7 +26,16 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(feature = "software-hevc")]
 mod software;
+#[cfg(feature = "software-hevc")]
+use software::pixels;
+
+/// No decoder in this build.
+#[cfg(not(feature = "software-hevc"))]
+fn pixels(_: HeicFile) -> Result<Pixels> {
+    bail!("This build of RAWmakase has no HEVC decoder, so it can't show HEIF images")
+}
 
 /// Decoded pixels: `width` × `height` of interleaved RGB, 8-bit samples or
 /// 16-bit ones (native endian), as [`HeicFile`]'s colour type says.
@@ -57,6 +71,8 @@ struct Layout {
     /// The pictures, row by row, `columns` to a row: each item and its HEVC
     /// configuration, one for each item a grid lists however often.
     tiles: Vec<(u32, Arc<hevc::Config>)>,
+    // RAWmakase's own decoder lays out the tiles; a platform's the file.
+    #[cfg_attr(not(feature = "software-hevc"), allow(dead_code))]
     columns: u32,
     /// Each picture's size.
     tile: (u32, u32),
@@ -67,7 +83,9 @@ pub(super) struct HeicFile {
     /// More than 8 bits per sample, from `hvcC`.
     deep: bool,
     /// The file and its boxes, to read the pictures from when decoding.
+    #[cfg_attr(not(feature = "software-hevc"), allow(dead_code))]
     file: std::fs::File,
+    #[cfg_attr(not(feature = "software-hevc"), allow(dead_code))]
     heif: Heif,
     layout: Layout,
     icc: Option<Vec<u8>>,
@@ -123,7 +141,9 @@ impl HeicFile {
         let animated = [b"msf1", b"hevc", b"hevx", b"hevm", b"hevs"];
         // rust_h265 decodes 4:2:0 and 4:4:4: the others are refused from the
         // header, so Develop says why, as for a tiled AVIF.
-        let refused = if chroma == 0 {
+        let refused = if cfg!(not(feature = "software-hevc")) {
+            Some(Unsupported("HEIF".into()))
+        } else if chroma == 0 {
             Some(Unsupported("monochrome HEIF".into()))
         } else if chroma == 2 {
             Some(Unsupported("4:2:2 HEIF".into()))
@@ -335,7 +355,7 @@ impl ImageDecoder for HeicFile {
         };
         let (crop, deep) = (self.crop, self.deep);
         let full = (self.layout.width, self.layout.height);
-        let Pixels { width, height, rgb } = software::pixels(self).map_err(failed)?;
+        let Pixels { width, height, rgb } = pixels(self).map_err(failed)?;
         if (width, height) != full {
             return Err(failed(anyhow!("The HEIF image is not the size it says")));
         }

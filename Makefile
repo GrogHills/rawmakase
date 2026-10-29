@@ -1,13 +1,16 @@
 PREFIX ?= $(HOME)/.local
 # Package name for the license directory (Arch packages pass their pkgname).
 PKGNAME ?= rawmakase
+# Extra flags for the release build, e.g. --no-default-features to leave out
+# the software HEVC decoder (see docs/dependencies.md).
+CARGO_FLAGS ?=
 BIN := target/release/rawmakase
 
 .PHONY: all build check install uninstall
 all: build
 
 build:
-	cargo build --release --locked
+	cargo build --release --locked $(CARGO_FLAGS)
 
 check:
 	python3 scripts/deps.py check

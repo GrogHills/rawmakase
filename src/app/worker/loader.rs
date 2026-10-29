@@ -448,6 +448,7 @@ pub(in crate::app) mod tests {
 
     /// A HEIC opens as a JPEG does: at full size at once, with its own
     /// profile, and never decode-cached.
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_loads_straight_to_full_size() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;

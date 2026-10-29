@@ -933,7 +933,8 @@ mod tests {
             ("ten-bit.avif", "b.png", 0),
             // A JPEG transcode, so the pixels are only near.
             ("metadata.jxl", "c.webp", 8),
-            // Lossy 4:2:0.
+            // Lossy 4:2:0, where there is a HEVC decoder.
+            #[cfg(feature = "software-hevc")]
             ("grid.heic", "d.jpg", 4),
         ] {
             let path = dir.path().join(to);
@@ -1228,6 +1229,7 @@ mod tests {
 
     /// libheif's own HEIC: 4:2:0 in a 64×64 picture it crops (`clap`) to the
     /// 16×12 drawing.
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_decodes_cropped_with_its_colours() {
         assert_eq!(super::dimensions(&fixture("metadata.heic")), Some((16, 12)));
@@ -1242,6 +1244,7 @@ mod tests {
     /// A grid as an iPhone writes one: four tiles laid in place and cut to
     /// the grid's size, each converted by the matrix and range of its own
     /// `nclx` (BT.709, limited range), as the grid has only an ICC profile.
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_grid_is_laid_out_and_cut_to_its_size() {
         assert_eq!(super::dimensions(&fixture("grid.heic")), Some((120, 100)));
@@ -1260,6 +1263,7 @@ mod tests {
         assert!(last.iter().all(|v| *v >= 250), "{last:?}");
     }
 
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_decodes_upright_by_its_rotation_and_mirror() {
         // As rotated.avif: irot 1 brings the top-right (green) to the top-left,
@@ -1278,6 +1282,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_ten_bit_heic_keeps_its_depth_and_colours() -> anyhow::Result<()> {
         assert_corners_near(corners(&decode(&fixture("ten-bit.heic"))?), UPRIGHT, 1);
@@ -1290,6 +1295,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heics_cicp_colours_are_converted() {
         // As p3.avif: lossless P3 through the identity matrix.
@@ -1306,6 +1312,7 @@ mod tests {
 
     /// A PQ HEIC is shown, its reference white as white, but not edited; nor
     /// is a still in a file whose brands say it holds a sequence.
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn hdr_and_sequence_heics_are_refused_for_develop() {
         assert_eq!(super::probe(&fixture("pq.heic")).unwrap_err().0, "HDR");
@@ -1326,6 +1333,7 @@ mod tests {
 
     /// The size and the refusal come from a HEIC's header: its HEVC data is
     /// read only to decode it.
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_header_is_read_without_its_image_data() {
         let dir = tempfile::tempdir().unwrap();
@@ -1394,6 +1402,7 @@ mod tests {
 
     /// 4:2:2 and monochrome HEVC, which RAWmakase does not decode, are
     /// refused from the header, so Develop says why rather than failing.
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_of_chroma_it_does_not_decode_is_refused_from_its_header() {
         let dir = tempfile::tempdir().unwrap();
@@ -1425,6 +1434,7 @@ mod tests {
     }
 
     /// A grid may list one tile several times; each place shows it.
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_grid_listing_a_tile_twice_shows_it_twice() {
         let dir = tempfile::tempdir().unwrap();
@@ -1443,5 +1453,16 @@ mod tests {
         assert_corners_near([corners(&image)[0]; 4], [UPRIGHT[0]; 4], 4);
         let grey = corners(&image)[1];
         assert!(grey.iter().all(|v| v.abs_diff(128) <= 2), "{grey:?}");
+    }
+
+    /// A build without a HEVC decoder lists a HEIC with its size, but Develop
+    /// refuses it and decoding says why.
+    #[cfg(not(feature = "software-hevc"))]
+    #[test]
+    fn without_a_decoder_a_heic_is_listed_but_refused() {
+        assert_eq!(super::dimensions(&fixture("grid.heic")), Some((120, 100)));
+        assert_eq!(super::probe(&fixture("grid.heic")).unwrap_err().0, "HEIF");
+        let err = decode(&fixture("grid.heic")).unwrap_err().to_string();
+        assert!(err.contains("no HEVC decoder"), "{err}");
     }
 }
