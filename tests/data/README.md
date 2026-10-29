@@ -20,7 +20,7 @@ message). No camera data or photos.
 (top-left, top-right, bottom-left, bottom-right) on grey. Metadata fixtures carry Make
 "Fixture", Model "Synthetic 1", DateTimeOriginal 2024:05:04 10:21:33 and the XMP title
 "Fixture title". Orientation fixtures: AVIF `irot`/`imir`, WebP and JXL EXIF Orientation 6.
-`pq.*` use the PQ transfer (HDR), `animated.*` have two frames, `tiled.avif` is a 2×2 grid of 64×64 cells (MIAF forbids smaller tiles). `cropped.avif` has a clean aperture (`clap`), an essential property RAWmakase does not read. `split-exif.avif` is `metadata.avif` with its Exif item stored in two `iloc` extents.
+`pq.*` use the PQ transfer (HDR), `animated.*` have two frames, `tiled.avif` is a 2×2 grid of 64×64 cells (MIAF forbids smaller tiles). `cropped.avif` has an essential clean aperture (`clap`), which RAWmakase reads (a HEIC's is applied) but does not apply to an AVIF, so it refuses the file. `split-exif.avif` is `metadata.avif` with its Exif item stored in two `iloc` extents.
 
 The HEIC fixtures are drawn by `python3 scripts/make-heic-fixtures.py tests/data/formats` (Pillow and
 `pillow-heif`, whose libheif and x265 versions the script prints for the commit message), from the

@@ -17,6 +17,8 @@ pub(super) struct Config {
     length_size: u8,
     /// Bits per luma sample.
     pub(super) depth: u8,
+    /// `chroma_format_idc`: 0 monochrome, 1 4:2:0, 2 4:2:2, 3 4:4:4.
+    pub(super) chroma: u8,
     /// The VPS, SPS, PPS and SEI NAL units, in order.
     parameter_sets: Vec<Vec<u8>>,
 }
@@ -32,6 +34,7 @@ impl Config {
             return None;
         }
         let depth = (hvcc[17] & 7) + 8;
+        let chroma = hvcc[16] & 3;
         let mut rest = &hvcc[23..];
         let mut take = |n: usize| {
             let (head, tail) = rest.split_at_checked(n)?;
@@ -50,6 +53,7 @@ impl Config {
         Some(Self {
             length_size,
             depth,
+            chroma,
             parameter_sets,
         })
     }
@@ -184,6 +188,7 @@ mod tests {
         let config = Config::read(&hvcc(&[&[0x40, 1, 2], &[0x42, 1]])).unwrap();
         assert_eq!(config.length_size, 4);
         assert_eq!(config.depth, 8);
+        assert_eq!(config.chroma, 1);
         assert_eq!(config.parameter_sets, [vec![0x40, 1, 2], vec![0x42, 1]]);
         let mut ten_bit = hvcc(&[]);
         ten_bit[17] = 0xfa;

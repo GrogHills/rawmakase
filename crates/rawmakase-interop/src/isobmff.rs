@@ -308,15 +308,23 @@ impl Heif {
             .collect()
     }
 
-    /// An essential property of item `id` that is not read here, which a
-    /// reader must understand to show the item, e.g. `clap` (a crop).
-    pub fn unread_essential(&self, id: u32) -> Option<[u8; 4]> {
+    /// The properties of item `id` it marks essential, which a reader must
+    /// understand to show it.
+    pub fn essential_properties(&self, id: u32) -> Vec<&Property> {
         self.associations
             .iter()
             .filter(|(item, _)| *item == id)
             .flat_map(|(_, indexes)| indexes.iter())
             .filter(|(_, essential)| *essential)
             .filter_map(|(i, _)| self.properties.get((*i as usize).checked_sub(1)?))
+            .collect()
+    }
+
+    /// An essential property of item `id` that is not read here, e.g. `lsel`
+    /// (a layer selection).
+    pub fn unread_essential(&self, id: u32) -> Option<[u8; 4]> {
+        self.essential_properties(id)
+            .into_iter()
             .find_map(|p| match p {
                 Property::Other(kind) => Some(*kind),
                 _ => None,
@@ -412,8 +420,14 @@ impl Heif {
                         .map(|(kind, body)| property(kind, body).unwrap_or(Property::Other(kind)))
                         .collect()
                 }
-                // One per version and flags, so there may be several.
-                b"ipma" => self.associations.extend(associations(Bytes(body))?),
+                // One per version and flags, so there may be several; an
+                // item has one association at most, so there are no more
+                // associations than items can be listed. Each lookup scans
+                // them all.
+                b"ipma" if self.associations.len() < MAX_BOXES => {
+                    self.associations.extend(associations(Bytes(body))?);
+                    self.associations.truncate(MAX_BOXES);
+                }
                 _ => {}
             }
         }
@@ -899,6 +913,34 @@ mod tests {
         let heif = Heif::read(&mut Cursor::new(&file)).unwrap();
         assert_eq!(heif.properties(1), [&Property::Size(1, 2)]);
         assert_eq!(heif.properties(2), [&Property::Rotation(1)]);
+    }
+
+    /// An item has one association at most, so no more are kept than items
+    /// can be listed: each lookup scans them all, and a grid looks up every
+    /// tile.
+    #[test]
+    fn associations_beyond_as_many_as_items_are_not_kept() {
+        let ipco = bx(b"ipco", &bx(b"irot", &[1]));
+        let ipma = |ids: std::ops::Range<u32>| {
+            let mut body = vec![1, 0, 0, 0];
+            body.extend((ids.len() as u32).to_be_bytes());
+            for id in ids {
+                body.extend(id.to_be_bytes());
+                body.extend([1, 0x81]);
+            }
+            bx(b"ipma", &body)
+        };
+        let full = MAX_BOXES as u32;
+        let iprp = bx(
+            b"iprp",
+            &[ipco, ipma(1..full + 1), ipma(full + 1..full + 3)].concat(),
+        );
+        let meta = [vec![0; 4], iprp].concat();
+        let file = [bx(b"ftyp", b"heic\0\0\0\0mif1"), bx(b"meta", &meta)].concat();
+        let heif = Heif::read(&mut Cursor::new(&file)).unwrap();
+        assert_eq!(heif.associations.len(), MAX_BOXES);
+        assert_eq!(heif.essential_properties(full), [&Property::Rotation(1)]);
+        assert!(heif.properties(full + 1).is_empty());
     }
 
     #[test]

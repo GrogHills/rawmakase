@@ -894,6 +894,24 @@ mod tests {
         assert_eq!(super::dimensions(&fixture("cropped.avif")), None);
     }
 
+    /// A crop not marked essential is ignored, as it was before RAWmakase
+    /// read crops: the image opens uncropped.
+    #[test]
+    fn an_avif_crop_not_marked_essential_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("optional-crop.avif");
+        let mut bytes = std::fs::read(fixture("cropped.avif")).unwrap();
+        // The primary item's associations: ispe, pixi, av1C (essential), colr,
+        // clap (essential).
+        let at = bytes
+            .windows(3)
+            .position(|w| w == [0x83, 0x04, 0x85])
+            .unwrap();
+        bytes[at + 2] = 0x05;
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(decode(&path).unwrap().dimensions(), (16, 12));
+    }
+
     /// The size and the refusal come from an AVIF's header: its AV1 data is
     /// read only to decode it.
     #[test]
@@ -1372,5 +1390,58 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let err = decode(&path).unwrap_err().to_string();
         assert!(err.contains("cover"), "{err}");
+    }
+
+    /// 4:2:2 and monochrome HEVC, which RAWmakase does not decode, are
+    /// refused from the header, so Develop says why rather than failing.
+    #[test]
+    fn a_heic_of_chroma_it_does_not_decode_is_refused_from_its_header() {
+        let dir = tempfile::tempdir().unwrap();
+        for (chroma, reason) in [(2, "4:2:2 HEIF"), (0, "monochrome HEIF")] {
+            let path = dir.path().join(format!("chroma-{chroma}.heic"));
+            let mut bytes = std::fs::read(fixture("grid.heic")).unwrap();
+            // The tiles' one hvcC: chromaFormat is the low bits of its 17th byte.
+            let at = bytes.windows(4).position(|w| w == b"hvcC").unwrap() + 4 + 16;
+            bytes[at] = 0xfc | chroma;
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(super::probe(&path).unwrap_err().0, reason);
+            assert_eq!(super::dimensions(&path), Some((120, 100)));
+        }
+    }
+
+    /// A tile is laid as it is coded: one that says it is turned is not
+    /// laid out wrongly.
+    #[test]
+    fn a_heic_grid_whose_tiles_are_turned_is_not_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = std::fs::read(fixture("grid.heic")).unwrap();
+        // The tiles' colr (nclx) becomes an irot.
+        let at = bytes.windows(8).position(|w| w == b"colrnclx").unwrap();
+        bytes[at..at + 4].copy_from_slice(b"irot");
+        let path = dir.path().join("turned-tiles.heic");
+        std::fs::write(&path, bytes).unwrap();
+        let err = decode(&path).unwrap_err().to_string();
+        assert!(err.contains("turned"), "{err}");
+    }
+
+    /// A grid may list one tile several times; each place shows it.
+    #[test]
+    fn a_heic_grid_listing_a_tile_twice_shows_it_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = std::fs::read(fixture("grid.heic")).unwrap();
+        // dimg from the grid (1) to its four tiles (2 to 5): all to tile 2.
+        let at = bytes
+            .windows(12)
+            .position(|w| w == [0, 1, 0, 4, 0, 2, 0, 3, 0, 4, 0, 5])
+            .unwrap();
+        bytes[at + 4..at + 12].copy_from_slice(&[0, 2, 0, 2, 0, 2, 0, 2]);
+        let path = dir.path().join("one-tile.heic");
+        std::fs::write(&path, bytes).unwrap();
+        let image = decode(&path).unwrap();
+        // The top-left tile's red corner, and its grey where the top-right
+        // tile's green was.
+        assert_corners_near([corners(&image)[0]; 4], [UPRIGHT[0]; 4], 4);
+        let grey = corners(&image)[1];
+        assert!(grey.iter().all(|v| v.abs_diff(128) <= 2), "{grey:?}");
     }
 }

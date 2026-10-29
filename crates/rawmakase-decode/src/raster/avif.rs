@@ -133,8 +133,10 @@ impl AvifFile {
             bail!("The AVIF image needs `{kind}`, which RAWmakase can't read");
         }
         let props = heif.properties(heif.primary);
-        // A crop is read (a HEIC applies it), but an AVIF's is not applied yet.
-        if props
+        // An essential crop is read (a HEIC applies it), but an AVIF's is not
+        // applied yet; one not marked essential is ignored, as before.
+        if heif
+            .essential_properties(heif.primary)
             .iter()
             .any(|p| matches!(p, Property::CleanAperture(_)))
         {

@@ -110,7 +110,7 @@ belongs to `raw`; library browsing does not call into the preview renderer.
 Whether Develop opens a catalog photo has one owner, `app::library::Refusal`:
 `develop_refusal` refuses an offline file, and a JPEG, PNG, TIFF, WebP, AVIF, HEIF or JPEG XL whose header
 `raster::probe` finds Develop can't edit (`raster::Unsupported`, such as a CMYK
-JPEG, an HDR or animated file, or a tiled AVIF), before anything opens it. The probe reads the file, so only work on one
+JPEG, an HDR or animated file, a tiled AVIF, or a 4:2:2 or monochrome HEIF), before anything opens it. The probe reads the file, so only work on one
 photo uses it (opening it, its dialog, Quick Develop, the context menu,
 automation's `open`); export and preview builds over many photos use
 `availability_refusal` and meet such a file as that photo's failure; `Refusal::opening` turns the same error, should

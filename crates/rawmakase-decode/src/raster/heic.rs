@@ -27,9 +27,16 @@ use rayon::prelude::*;
 use std::path::Path;
 use yuv::{YuvPlanarImage, YuvRange};
 
-/// The most pixels the decoded picture may have before its crop, as many as
-/// `prepare` lets an image have after it.
+/// The most pixels decoded for an image, each of its tiles whole, as many as
+/// `prepare` lets an image have.
 const MAX_PIXELS: u64 = 150_000_000;
+
+/// The most bytes a picture of `width` × `height` is read from: HEVC codes
+/// one in fewer than its samples take at 16 bits, with room for the SEI an
+/// encoder adds. More is not a picture of that size, and is not read.
+fn coded_budget(width: u32, height: u32) -> u64 {
+    u64::from(width) * u64::from(height) * 6 + (64 << 10)
+}
 
 /// Where the image is in the decoded picture: its clean aperture.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -80,7 +87,7 @@ impl HeicFile {
         }
         let layout = match &primary.kind {
             b"hvc1" => {
-                let (config, (width, height)) = picture(&heif, heif.primary)?;
+                let (config, (width, height)) = picture(&heif, heif.primary, false)?;
                 Layout {
                     width,
                     height,
@@ -92,8 +99,11 @@ impl HeicFile {
             b"grid" => grid(&heif, &mut file)?,
             _ => bail!("The HEIF image is not HEVC"),
         };
+        // Every tile is decoded whole, so the tiles, which cover the image,
+        // bound the work.
+        let (tw, th) = layout.tile;
         ensure!(
-            u64::from(layout.width) * u64::from(layout.height) <= MAX_PIXELS,
+            layout.tiles.len() as u64 * u64::from(tw) * u64::from(th) <= MAX_PIXELS,
             "Image too large to preview"
         );
         let props = heif.properties(heif.primary);
@@ -101,13 +111,22 @@ impl HeicFile {
         let (icc, nclx) = avif::colour(&props);
         let (tile_icc, tile_nclx) = avif::colour(&heif.properties(layout.tiles[0].0));
         let (icc, nclx) = (icc.or(tile_icc), nclx.or(tile_nclx));
-        let depth = layout.tiles[0].1.depth;
+        let (depth, chroma) = (layout.tiles[0].1.depth, layout.tiles[0].1.chroma);
         ensure!(
-            layout.tiles.iter().all(|(_, c)| c.depth == depth),
-            "The HEIF image's tiles differ in depth"
+            layout
+                .tiles
+                .iter()
+                .all(|(_, c)| (c.depth, c.chroma) == (depth, chroma)),
+            "The HEIF image's tiles differ in depth or chroma"
         );
         let animated = [b"msf1", b"hevc", b"hevx", b"hevm", b"hevs"];
-        let refused = if nclx.is_some_and(Nclx::hdr) {
+        // rust_h265 decodes 4:2:0 and 4:4:4: the others are refused from the
+        // header, so Develop says why, as for a tiled AVIF.
+        let refused = if chroma == 0 {
+            Some(Unsupported("monochrome HEIF".into()))
+        } else if chroma == 2 {
+            Some(Unsupported("4:2:2 HEIF".into()))
+        } else if nclx.is_some_and(Nclx::hdr) {
             Some(Unsupported("HDR".into()))
         } else if heif.brands.iter().any(|b| animated.contains(&b)) {
             Some(Unsupported("animated".into()))
@@ -142,13 +161,16 @@ impl HeicFile {
         } = &self.layout;
         let mut canvas: Option<hevc::Picture> = None;
         let batch = rayon::current_num_threads().max(1);
+        let budget = coded_budget(tile.0, tile.1);
         for (b, chunk) in tiles.chunks(batch).enumerate() {
             let data = chunk
                 .iter()
                 .map(|(id, _)| {
                     self.heif
-                        .data(&mut self.file, *id)
-                        .ok_or_else(|| anyhow!("The HEIF image data is missing or cut off"))
+                        .data_up_to(&mut self.file, *id, budget)
+                        .ok_or_else(|| {
+                            anyhow!("The HEIF image data is missing, cut off or too large")
+                        })
                 })
                 .collect::<Result<Vec<_>>>()?;
             let pictures: Vec<_> = chunk
@@ -179,8 +201,9 @@ impl HeicFile {
     }
 }
 
-/// An `hvc1` item's configuration and size; the item may be a grid's tile.
-fn picture(heif: &Heif, id: u32) -> Result<(hevc::Config, (u32, u32))> {
+/// An `hvc1` item's configuration and size; the item may be a grid's `tile`,
+/// which may not be cropped or turned itself.
+fn picture(heif: &Heif, id: u32, tile: bool) -> Result<(hevc::Config, (u32, u32))> {
     let item = heif
         .item(id)
         .ok_or_else(|| anyhow!("The HEIF image is missing a tile"))?;
@@ -190,6 +213,16 @@ fn picture(heif: &Heif, id: u32) -> Result<(hevc::Config, (u32, u32))> {
         bail!("The HEIF image needs `{kind}`, which RAWmakase can't read");
     }
     let props = heif.properties(id);
+    let transformed = props.iter().any(|p| {
+        matches!(
+            p,
+            Property::CleanAperture(_) | Property::Rotation(_) | Property::Mirror(_)
+        )
+    });
+    ensure!(
+        !(tile && transformed),
+        "The HEIF image's tiles are cropped or turned, which RAWmakase can't read"
+    );
     let size = props
         .iter()
         .find_map(|p| match p {
@@ -237,13 +270,16 @@ fn grid(heif: &Heif, file: &mut std::fs::File) -> Result<Layout> {
         ids.len(),
         rows * columns
     );
-    let tiles = ids
-        .iter()
-        .map(|id| picture(heif, *id).map(|(config, size)| (*id, config, size)))
-        .collect::<Result<Vec<_>>>()?;
-    let tile = tiles[0].2;
+    // A grid may list a tile more than once; each is read once.
+    let mut read = std::collections::HashMap::new();
+    for id in &ids {
+        if !read.contains_key(id) {
+            read.insert(*id, picture(heif, *id, true)?);
+        }
+    }
+    let tile = read[&ids[0]].1;
     ensure!(
-        tiles.iter().all(|(_, _, size)| *size == tile),
+        read.values().all(|(_, size)| *size == tile),
         "The HEIF image's tiles differ in size"
     );
     let covers = |count: u32, size: u32, full: u32| {
@@ -258,10 +294,7 @@ fn grid(heif: &Heif, file: &mut std::fs::File) -> Result<Layout> {
     Ok(Layout {
         width,
         height,
-        tiles: tiles
-            .into_iter()
-            .map(|(id, config, _)| (id, config))
-            .collect(),
+        tiles: ids.iter().map(|id| (*id, read[id].0.clone())).collect(),
         columns,
         tile,
     })
