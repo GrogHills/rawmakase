@@ -209,6 +209,10 @@ fn opener(
                 errors,
                 groups,
             } = crate::camera_profiles::listed(&metadata);
+            // A photo without colour data starts from its fitted camera look, fitted
+            // (or read from the fit cache) before its defaults are installed.
+            let profiles =
+                crate::camera_look::with_default(&path, &metadata, profiles, &job.cancel);
             // The raw defaults; the catalog's edit replaces them once the header
             // is installed.
             let recipe = job.defaults.resolve(&metadata, &profiles).recipe;

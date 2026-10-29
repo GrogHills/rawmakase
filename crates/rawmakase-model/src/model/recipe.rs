@@ -413,7 +413,9 @@ impl Recipe {
             ProfilePreference::Camera => camera_matching_profile(m, profiles),
         };
         // As in Lightroom: Adobe Color, else Adobe Standard. Without those, a DNG
-        // keeps the profile it embeds, and any other file gets RAWmakase Color.
+        // keeps the profile it embeds, and any other file gets RAWmakase Color, or
+        // the Camera Look fitted as the default of a photo without colour data (only
+        // that photo's list has one).
         if let Some(profile) = own
             .or_else(|| find("Adobe Color"))
             .or_else(|| find("Adobe Standard"))
@@ -422,6 +424,13 @@ impl Recipe {
                     .profile
                     .is_none()
                     .then(|| find(crate::camera_profiles::open::COLOR))
+                    .flatten()
+            })
+            .or_else(|| {
+                recipe
+                    .profile
+                    .is_none()
+                    .then(|| find(crate::camera_profiles::fitted::LOOK))
                     .flatten()
             })
         {

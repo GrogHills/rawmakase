@@ -102,7 +102,7 @@ fn identity_of(e: &Editor, id: PhotoId) -> String {
         .catalog
         .edit_record(id)
         .unwrap();
-    identity(&record, &e.raw_defaults, e.demosaic)
+    identity(&record, &e.raw_defaults, &e.profile_library, e.demosaic)
 }
 fn fresh(cache: &Path, e: &Editor, id: PhotoId) -> bool {
     PreviewCache::open(cache)
@@ -452,7 +452,7 @@ fn previews_developed_by_an_earlier_decoder_are_refused() {
         .flat_map(|record| decoders.map(|decoder| (record.clone(), decoder)))
     {
         let old = earlier(&record, decoder);
-        assert_ne!(old, identity(&record, &defaults, Demosaic::Rawmakase));
+        assert_ne!(old, identity(&record, &defaults, "", Demosaic::Rawmakase));
         cache
             .store_sized(&photo, &old, PreviewKind::Standard, &stamp, 1024, &image)
             .unwrap();
@@ -461,7 +461,7 @@ fn previews_developed_by_an_earlier_decoder_are_refused() {
                 .sized_fresh(&photo, &old, PreviewKind::Standard, 1024)
                 .unwrap()
         );
-        let now = identity(&record, &defaults, Demosaic::Rawmakase);
+        let now = identity(&record, &defaults, "", Demosaic::Rawmakase);
         assert!(
             !cache
                 .sized_fresh(&photo, &now, PreviewKind::Standard, 1024)
@@ -484,31 +484,44 @@ fn identity_follows_the_edit_the_defaults_and_the_demosaic() {
         recipe: Some("{\"exposure\":1}".into()),
         ..Default::default()
     };
-    let base = identity(&none, &defaults, Demosaic::Rawmakase);
-    assert_eq!(base, identity(&none, &defaults, Demosaic::Rawmakase));
-    assert_ne!(base, identity(&saved, &defaults, Demosaic::Rawmakase));
+    let base = identity(&none, &defaults, "", Demosaic::Rawmakase);
+    assert_eq!(base, identity(&none, &defaults, "", Demosaic::Rawmakase));
+    assert_ne!(base, identity(&saved, &defaults, "", Demosaic::Rawmakase));
     let local = EditRecord {
         local: Some("[]".into()),
         ..saved.clone()
     };
     assert_ne!(
-        identity(&saved, &defaults, Demosaic::Rawmakase),
-        identity(&local, &defaults, Demosaic::Rawmakase)
+        identity(&saved, &defaults, "", Demosaic::Rawmakase),
+        identity(&local, &defaults, "", Demosaic::Rawmakase)
     );
     let lightroom = EditRecord {
         lightroom: Some("s = {}".into()),
         ..Default::default()
     };
-    assert_ne!(base, identity(&lightroom, &defaults, Demosaic::Rawmakase));
+    assert_ne!(
+        base,
+        identity(&lightroom, &defaults, "", Demosaic::Rawmakase)
+    );
     // Only a photo without an edit develops with the raw defaults.
     let other = DevelopDefaults::load(crate::raw_defaults::RawDefaults {
         master: crate::raw_defaults::DefaultChoice::CameraSettings,
         ..Default::default()
     });
-    assert_ne!(base, identity(&none, &other, Demosaic::Rawmakase));
+    assert_ne!(base, identity(&none, &other, "", Demosaic::Rawmakase));
     assert_eq!(
-        identity(&saved, &defaults, Demosaic::Rawmakase),
-        identity(&saved, &other, Demosaic::Rawmakase)
+        identity(&saved, &defaults, "", Demosaic::Rawmakase),
+        identity(&saved, &other, "", Demosaic::Rawmakase)
+    );
+    // Importing or removing any profile (another library fingerprint) changes an
+    // unedited photo's preview, never an edited one's.
+    assert_ne!(
+        base,
+        identity(&none, &defaults, "imported", Demosaic::Rawmakase)
+    );
+    assert_eq!(
+        identity(&saved, &defaults, "", Demosaic::Rawmakase),
+        identity(&saved, &defaults, "imported", Demosaic::Rawmakase)
     );
 }
 

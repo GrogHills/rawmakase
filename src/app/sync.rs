@@ -492,6 +492,7 @@ fn prepare(
         image: None,
     };
     let (profiles, _) = crate::camera_profiles::installed(&metadata);
+    let profiles = crate::camera_look::with_default(&target.path, &metadata, profiles, cancel);
     let record = catalog.edit_record(target.id)?;
     let resolved = edits::resolve(&record, &target.path, &metadata, &profiles, defaults)?;
     let starting_warnings = starting_warnings(resolved.origin, resolved.warnings);
@@ -647,6 +648,8 @@ fn photo_settings(
         .with_context(|| format!("{} can't be read", photo.name))?;
     let metadata = opened.metadata().clone();
     let (profiles, _) = crate::camera_profiles::installed(&metadata);
+    let profiles =
+        crate::camera_look::with_default(&photo.path, &metadata, profiles, &Default::default());
     let record = catalog.edit_record(photo.id)?;
     let resolved = edits::resolve(&record, &photo.path, &metadata, &profiles, defaults)?;
     let warnings = starting_warnings(resolved.origin, resolved.warnings);

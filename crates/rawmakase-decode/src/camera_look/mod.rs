@@ -16,6 +16,7 @@
 //! A look is used only when its full render beats the baseline on the held-out
 //! tiles ([`gate`]): a colour look, else one of the curve alone, else none. Fitting
 //! is deterministic; nothing here reads or writes the catalog or a cache.
+pub mod cache;
 mod gate;
 mod pairs;
 mod solve;
@@ -155,9 +156,10 @@ fn full_render(
     im: &rawmakase_model::camera_data::CameraImage,
     r: &Recipe,
     size: [u32; 2],
+    cancel: &AtomicBool,
 ) -> Result<Vec<Rgb>, Refusal> {
     let valid = r.checked().map_err(|e| refuse(format!("{e:#}")))?;
-    let out = develop::render(im, &valid, PROXY_EDGE * RENDER_FACTOR)
+    let out = develop::render_cancellable(im, &valid, PROXY_EDGE * RENDER_FACTOR, cancel)
         .map_err(|e| refuse(format!("{e:#}")))?;
     let linear: Vec<Rgb> = out.pixels.iter().map(|p| p.map(srgb_decode)).collect();
     let (w, h, reduced) = pairs::reduce(&linear, out.width, out.height);
@@ -194,6 +196,14 @@ fn clip_indicator(
     }
 }
 
+/// A refusal once `cancel` is set: the fit's caller no longer wants it.
+fn stopped(cancel: &AtomicBool) -> Result<(), Refusal> {
+    match cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        true => Err(refuse("Fitting cancelled")),
+        false => Ok(()),
+    }
+}
+
 /// The stage `stage` of `r` at the proxy's size.
 fn stage(
     im: &rawmakase_model::camera_data::CameraImage,
@@ -203,6 +213,70 @@ fn stage(
 ) -> Result<rawmakase_model::rendered::Rendered, Refusal> {
     develop::quality::render_stage_sized(im, r, stage, PROXY_EDGE * RENDER_FACTOR, cancel)
         .map_err(|e| refuse(format!("{e:#}")))
+}
+
+/// `profiles`, the photo's listed profiles, with Camera Look (fitted) added when
+/// it is the photo's default: a photo without colour data
+/// (`fitted::Eligibility::Absent`) whose fit is accepted. From the fit cache when
+/// it holds the file's result, else fitted now and stored (a failure to store is
+/// logged, the fit still used). Any other photo's list is returned as it is, at the
+/// cost of looking at its metadata. `Recipe::with_profile_preference` takes the
+/// fitted look only when nothing else applies, so the raw defaults, Reset,
+/// previews and exports all start from it alike.
+/// A fit stopped by `cancel` is neither used nor stored.
+pub fn with_default(
+    path: &Path,
+    m: &Metadata,
+    mut profiles: Vec<Arc<CameraProfile>>,
+    cancel: &AtomicBool,
+) -> Vec<Arc<CameraProfile>> {
+    if fitted::eligibility(m, &profiles) != fitted::Eligibility::Absent {
+        return profiles;
+    }
+    if let Some(p) = default_profile(path, m, &cache::dir(), cancel) {
+        profiles.push(Arc::new(p));
+    }
+    profiles
+}
+
+/// The default fit of an `Absent` photo, through the fit cache in `dir`.
+fn default_profile(
+    path: &Path,
+    m: &Metadata,
+    dir: &Path,
+    cancel: &AtomicBool,
+) -> Option<CameraProfile> {
+    let key = cache::FitKey::of(path).ok()?;
+    if let Some(result) = cache::load(dir, &key, m) {
+        return result.ok();
+    }
+    // A fit that panics must not stop the photo opening: it starts from what it
+    // would have without one, and is tried again next time.
+    let fitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fit(path, &FitInputs::default(), cancel)
+    }));
+    let Ok(fitted) = fitted else {
+        eprintln!(
+            "Camera Look (fitted): fitting {} stopped unexpectedly",
+            path.display()
+        );
+        return None;
+    };
+    let result = fitted.map(|f| f.profile).map_err(|e| e.reason);
+    // A file replaced or changed while it was fitted: the result may be of either
+    // file, so it is neither used nor stored.
+    if cancel.load(std::sync::atomic::Ordering::Relaxed)
+        || cache::FitKey::of(path).ok().as_ref() != Some(&key)
+    {
+        return None;
+    }
+    if let Err(e) = cache::store(dir, &key, &result) {
+        eprintln!(
+            "Camera Look (fitted): the fit of {} isn't cached: {e:#}",
+            path.display()
+        );
+    }
+    result.ok()
 }
 
 /// Fits a camera look to the photo at `path`, or says why it can't.
@@ -310,10 +384,10 @@ fn fit_pairs(
     if [sw, sh] != [w, h] {
         return Err(refuse("The photo's stages differ in size"));
     }
-    let baseline = full_render(im, &pairing_recipe(m, known.clone()), [w, h])?;
+    let baseline = full_render(im, &pairing_recipe(m, known.clone()), [w, h], cancel)?;
     report.baseline = gate::score(&baseline, &target_srgb, &testing, w, h);
     if fitted_matrix {
-        let base_only = full_render(im, &pairing_recipe(m, Some(base.clone())), [w, h])?;
+        let base_only = full_render(im, &pairing_recipe(m, Some(base.clone())), [w, h], cancel)?;
         let matrix_de00 = known.as_ref().map_or(0., |k| {
             matrix_distance(k, &base, &pick(&proxy.camera, &fitting))
         });
@@ -322,6 +396,7 @@ fn fit_pairs(
             matrix_de00,
         });
     }
+    stopped(cancel)?;
     let fit_scene = pick(&scene, &fitting);
     let looks: Vec<(Kind, fitted::FittedLook)> = if report.monochrome {
         vec![(
@@ -341,15 +416,22 @@ fn fit_pairs(
         ]
     };
     let mut chosen = None;
+    stopped(cancel)?;
     for (kind, look) in looks {
+        stopped(cancel)?;
         let profile = fitted::with_look(&base, &look).map_err(|e| refuse(format!("{e:#}")))?;
-        let render = full_render(im, &pairing_recipe(m, Some(profile.clone())), [w, h])?;
+        let render = full_render(
+            im,
+            &pairing_recipe(m, Some(profile.clone())),
+            [w, h],
+            cancel,
+        )?;
         let scores = gate::score(&render, &target_srgb, &testing, w, h);
         let refused = match kind {
             Kind::Colour => gate::colour_refusal(&scores, &report.baseline, report.coloured),
             Kind::ToneOnly | Kind::Monochrome => gate::tone_refusal(&scores, &report.baseline),
         };
-        if kind == Kind::Colour {
+        if kind == Kind::Colour && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
             report.direct = Some(direct(
                 &profile,
                 &scene,
@@ -427,6 +509,58 @@ fn matrix_distance(a: &CameraProfile, b: &CameraProfile, camera: &[Rgb]) -> f32 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chart(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!(
+            "{}/../../tests/corpus/charts/{name}.dng",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+    }
+
+    /// Only a photo without colour data gets a default fit, through the cache: a
+    /// photo with a profile is never fitted, and a photo whose fit is refused (no
+    /// preview here) is not fitted again.
+    #[test]
+    fn only_a_photo_without_colour_data_is_fitted_by_default_and_only_once() {
+        let named = chart("synthetic-d65");
+        let m = crate::photo::open(&named).unwrap().metadata;
+        let (profiles, _) = rawmakase_model::camera_profiles::installed(&m);
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            with_default(&named, &m, profiles.clone(), &cancel),
+            profiles
+        );
+        // The chart with its colour tags renamed: no colour data at all.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = std::fs::read(&named).unwrap();
+        let first = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        let count = u16::from_le_bytes(bytes[first..first + 2].try_into().unwrap()) as usize;
+        for i in 0..count {
+            let at = first + 2 + i * 12;
+            let tag = u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+            if [50721, 50722, 50938, 50939, 50964, 50965, 50982].contains(&tag) {
+                bytes[at..at + 2].copy_from_slice(&(tag + 10000).to_le_bytes());
+            }
+        }
+        let bare = dir.path().join("bare.dng");
+        std::fs::write(&bare, &bytes).unwrap();
+        let m = crate::photo::open(&bare).unwrap().metadata;
+        assert_eq!(fitted::eligibility(&m, &[]), fitted::Eligibility::Absent);
+        let cache = dir.path().join("cache");
+        assert!(default_profile(&bare, &m, &cache, &cancel).is_none());
+        let key = cache::FitKey::of(&bare).unwrap();
+        assert!(
+            matches!(cache::load(&cache, &key, &m), Some(Err(_))),
+            "the refusal is kept"
+        );
+        // Cancelled: nothing used, nothing stored (another file: the cache is keyed
+        // by content, so a copy would share the first one's entry).
+        let other = dir.path().join("other.dng");
+        bytes.push(0);
+        std::fs::write(&other, &bytes).unwrap();
+        assert!(default_profile(&other, &m, &cache, &AtomicBool::new(true)).is_none());
+        assert!(cache::load(&cache, &cache::FitKey::of(&other).unwrap(), &m).is_none());
+    }
 
     /// A photo whose lens correction brightens the corners: bright but unclipped
     /// samples there are not taken for clipped, and a clipped one still is.

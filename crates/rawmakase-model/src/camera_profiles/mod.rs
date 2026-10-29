@@ -799,7 +799,8 @@ pub use dcp::{d65_color_matrix, from_bytes};
 pub use enhanced::RgbLook;
 pub use library::{
     CubeImport, Groups, Imported, ImportedProfile, Listed, MenuEntry, adobe_installed, builtin,
-    compose_look, import_files, import_readable, installed, library_dirs, listed, load, read_cube,
+    compose_look, fingerprint as library_fingerprint, import_files, import_readable, installed,
+    library_dirs, listed, load, read_cube,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use library::{import_into_dir, listed_from};

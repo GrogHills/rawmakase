@@ -2161,3 +2161,58 @@ fn a_fitted_look_round_trips_whole() -> Result<()> {
     );
     Ok(())
 }
+/// Under a fitted matrix base (a camera without colour data) Temp and Tint are
+/// relative to the white as shot; written to XMP and read back they give the same
+/// multipliers, with a DNG's CameraCalibration in them too.
+#[test]
+fn white_balance_round_trips_under_a_fitted_matrix_base() -> Result<()> {
+    use crate::camera_profiles::fitted;
+    let m = Metadata {
+        make: "Test".into(),
+        model: "NoMatrix".into(),
+        wb: [1.9, 1., 1.4],
+        daylight_wb: [1.; 3],
+        baseline_exposure: Some(0.),
+        dng_neutral_calibration: Some(crate::camera_data::NeutralCalibration {
+            gains: [0.9, 1., 1.1],
+            signature: String::new(),
+        }),
+        ..Default::default()
+    };
+    let d50 = [0.9642f32, 1., 0.8249];
+    let raw = [[0.6f32, 0.3, 0.1], [0.25, 0.7, 0.05], [0.0, 0.1, 0.9]];
+    let forward = std::array::from_fn(|i| {
+        let sum: f32 = raw[i].iter().sum();
+        std::array::from_fn(|j| raw[i][j] * d50[i] / sum)
+    });
+    let base = fitted::matrix_base(&m, forward)?;
+    let profile = fitted::with_look(&base, &fitted::FittedLook::identity())?;
+    let mut r = Recipe::with_profiles(&m, &[]);
+    r.profile = Some(std::sync::Arc::new(profile));
+    r.reset_white_balance(&m);
+    assert!(
+        r.wb.iter().all(|g| (g - 1.).abs() < 1e-3),
+        "as shot: {:?}",
+        r.wb
+    );
+    r.temperature = 5200.;
+    r.tint = 6.;
+    r.update_wb(&m);
+    let photo = crate::xmp::write::Photo {
+        raw_name: "IMG.DNG".into(),
+        settings: true,
+        format: "image/jpeg".into(),
+        ..Default::default()
+    };
+    let packet = crate::xmp::write::packet(&r, &m, &photo);
+    let back = parse(Path::new("photo.xmp"), &packet)?.apply(
+        &Recipe::with_profiles(&m, &[]),
+        &m,
+        &[],
+        None,
+    )?;
+    for (a, b) in back.wb.iter().zip(r.wb) {
+        assert!((a - b).abs() < 2e-3, "{:?} {:?}", back.wb, r.wb);
+    }
+    Ok(())
+}

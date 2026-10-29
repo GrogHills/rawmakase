@@ -485,10 +485,15 @@ fn main() -> Result<()> {
                 rawmakase::catalog::legacy_sidecar::load(&input)?
                     .map(|s| s.recipe)
                     .unwrap_or_else(|| {
-                        Recipe::with_profiles(
+                        // As the app opens it: a photo without colour data starts
+                        // from its fitted camera look.
+                        let profiles = rawmakase::camera_look::with_default(
+                            &input,
                             &r.metadata,
-                            &rawmakase::camera_profiles::installed(&r.metadata).0,
-                        )
+                            rawmakase::camera_profiles::installed(&r.metadata).0,
+                            &AtomicBool::new(false),
+                        );
+                        Recipe::with_profiles(&r.metadata, &profiles)
                     })
             };
             if let Some(e) = exposure {

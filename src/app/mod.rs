@@ -147,6 +147,10 @@ pub(crate) struct Editor {
     /// Preferences > Raw Defaults, ready to apply; shared with the loader and the
     /// Library's previews.
     raw_defaults: std::sync::Arc<crate::raw_defaults::DevelopDefaults>,
+    /// The profile library as unedited photos' previews were last built from
+    /// (`camera_profiles::library_fingerprint`): read at start and after every
+    /// profile import, rather than scanned for each preview.
+    profile_library: String,
     /// Shared automation queue and independently configured input adapters.
     controls: automation::Hub,
     automation: commands::Automation,
@@ -365,6 +369,7 @@ impl Editor {
             raw_defaults: std::sync::Arc::new(crate::raw_defaults::DevelopDefaults::load(
                 session.raw_defaults.clone(),
             )),
+            profile_library: crate::camera_profiles::library_fingerprint(),
             controls: automation::Hub::inactive(),
             automation: commands::Automation::default(),
         };

@@ -176,6 +176,66 @@ pub fn is_uncalibrated_base(p: &CameraProfile) -> bool {
     }
 }
 
+/// How much colour data a photo has, for whether Camera Look (fitted) becomes its
+/// default. Only `Absent` does; every other photo can still fit one from the
+/// Profile menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Eligibility {
+    /// No colour matrix (no camera table row, nothing in the file or its maker
+    /// notes), no embedded profile and no imported camera profile for it.
+    Absent,
+    /// A matrix the camera transform rejects, or an embedded profile that can't be
+    /// read or is another camera's. Wins over `Absent`.
+    Invalid,
+    /// A matrix of doubtful origin: RAWmakase's earlier decoder's, Olympus maker
+    /// notes', or a DNG's tungsten calibration alone.
+    Questionable,
+    /// No colour data of its own, but an imported camera profile fits it: the user
+    /// chose that data.
+    Suppressed,
+    /// Colour data RAWmakase uses (and rendered files, monochrome DNGs).
+    Usable,
+}
+
+/// The photo's [`Eligibility`], given `profiles`, the profiles listed for it.
+pub fn eligibility(m: &Metadata, profiles: &[std::sync::Arc<CameraProfile>]) -> Eligibility {
+    use crate::camera_data::{EmbeddedProfileStatus as Embedded, MatrixSource as Source};
+    if m.is_rendered() || m.monochrome {
+        return Eligibility::Usable;
+    }
+    let invalid_embedded = matches!(
+        m.embedded_profile_status,
+        Embedded::Unreadable | Embedded::OtherCamera
+    );
+    match m.matrix_source {
+        Source::Absent => {
+            if invalid_embedded {
+                return Eligibility::Invalid;
+            }
+            if m.embedded_profile_status != Embedded::None {
+                return Eligibility::Usable;
+            }
+            let imported = profiles.iter().any(|p| {
+                p.enhanced.is_none()
+                    && !p.is_embedded()
+                    && !is_fitted(p)
+                    && p.name != super::open::STANDARD
+                    && p.ensure_camera(m).is_ok()
+            });
+            if imported {
+                Eligibility::Suppressed
+            } else {
+                Eligibility::Absent
+            }
+        }
+        _ if standard_base(m).is_none() || invalid_embedded => Eligibility::Invalid,
+        Source::CompatObserved | Source::MakerNote | Source::FileTungstenOnly => {
+            Eligibility::Questionable
+        }
+        _ => Eligibility::Usable,
+    }
+}
+
 /// The carried form's version prefix, and the most a carried profile may expand
 /// to (a fitted one is about 250 KB of JSON).
 const CARRIED: &str = "v1:";
@@ -285,6 +345,50 @@ mod tests {
             &FittedLook::identity(),
         );
         assert_ne!(d.unwrap().enhanced.unwrap().uuid, *uuid);
+    }
+
+    #[test]
+    fn only_a_photo_without_colour_data_is_absent() {
+        use crate::camera_data::{EmbeddedProfileStatus as Embedded, MatrixSource as Source};
+        let bare = Metadata {
+            make: "Test".into(),
+            model: "Camera".into(),
+            ..Default::default()
+        };
+        assert_eq!(eligibility(&bare, &[]), Eligibility::Absent);
+        let unreadable = Metadata {
+            embedded_profile_status: Embedded::Unreadable,
+            ..bare.clone()
+        };
+        assert_eq!(eligibility(&unreadable, &[]), Eligibility::Invalid);
+        // An imported DCP of any name for the camera: the user's choice stands.
+        let mut dcp = super::super::open::standard(&camera()).unwrap();
+        dcp.name = "My Own".into();
+        dcp.camera = "Test Camera".into();
+        let imported = [std::sync::Arc::new(dcp)];
+        assert_eq!(eligibility(&bare, &imported), Eligibility::Suppressed);
+        let with = |source| Metadata {
+            matrix_source: source,
+            ..camera()
+        };
+        assert_eq!(
+            eligibility(&with(Source::AdobeDng), &[]),
+            Eligibility::Usable
+        );
+        assert_eq!(
+            eligibility(&with(Source::CompatObserved), &[]),
+            Eligibility::Questionable
+        );
+        assert_eq!(
+            eligibility(&with(Source::FileTungstenOnly), &[]),
+            Eligibility::Questionable
+        );
+        let singular = Metadata {
+            matrix_source: Source::File,
+            cam_xyz: [[1., 1., 1.]; 3],
+            ..bare.clone()
+        };
+        assert_eq!(eligibility(&singular, &[]), Eligibility::Invalid);
     }
 
     #[test]

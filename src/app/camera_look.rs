@@ -5,6 +5,21 @@ use crate::camera_profiles::CameraProfile;
 use crate::develop::black_white::TreatmentChoice;
 use std::sync::Arc;
 
+/// `listed`, a photo's profiles listed again (after an import), with the fitted
+/// default it had (`had`, as the loader listed them) while the photo still has no
+/// colour data: listing again never fits, and the defaults stay what they were.
+pub(super) fn keep_fitted_default(
+    had: &[Arc<CameraProfile>],
+    m: &crate::camera_data::Metadata,
+    mut listed: Vec<Arc<CameraProfile>>,
+) -> Vec<Arc<CameraProfile>> {
+    use crate::camera_profiles::fitted;
+    if fitted::eligibility(m, &listed) == fitted::Eligibility::Absent {
+        listed.extend(had.iter().filter(|p| fitted::is_fitted(p)).cloned());
+    }
+    listed
+}
+
 impl Editor {
     /// Fits the open photo's camera look; it arrives as [`Event::CameraLook`]. A fit
     /// already running for the photo is cancelled for this one.
@@ -21,9 +36,20 @@ impl Editor {
             self.context.clone(),
             move |tx| {
                 let inputs = crate::camera_look::FitInputs::default();
+                // The file as it was when the fit started: one replaced or changed
+                // meanwhile may have been fitted instead of the photo shown.
+                let key = crate::camera_look::cache::FitKey::of(&path).ok();
                 let result = crate::camera_look::fit(&path, &inputs, &cancel)
                     .map(|f| Box::new(f.profile))
-                    .map_err(|e| e.reason);
+                    .map_err(|e| e.reason)
+                    .and_then(|p| {
+                        let same = key.is_some()
+                            && crate::camera_look::cache::FitKey::of(&path).ok() == key;
+                        match same {
+                            true => Ok(p),
+                            false => Err("the file changed while it was fitted".into()),
+                        }
+                    });
                 let _ = tx.send(Event::CameraLook {
                     id,
                     generation,
@@ -69,9 +95,15 @@ impl Editor {
             return;
         }
         let profile = Arc::new(*profile);
+        let metadata = self.document.metadata.clone();
         self.change_edit(Some(Step::new("Fit Camera Look", "")), |r| {
             let old = r.profile.replace(profile);
             r.profile_amount = 1.;
+            // Temp and Tint described the old profile's white: as a menu choice does,
+            // they follow the new one, the white balance unchanged.
+            if let Some(m) = &metadata {
+                r.profile_changed(m);
+            }
             // Treatment follows the profile in the same step, as a menu choice's does.
             r.follow_profile_treatment(old.as_deref(), None);
         });

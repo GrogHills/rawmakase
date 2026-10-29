@@ -108,6 +108,40 @@ pub fn library_dirs() -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// What the profile library holds, as one hash: each file's path, size and
+/// modification time. Unedited photos' previews follow the library (which profile
+/// a default picks, and whether a photo without colour data gets a fitted look,
+/// depend on it), so importing or removing any profile changes it.
+pub fn fingerprint() -> String {
+    fingerprint_of(&library_dirs())
+}
+pub(crate) fn fingerprint_of(dirs: &[std::path::PathBuf]) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    for dir in dirs {
+        let mut files = Vec::new();
+        collect(dir, 0, &mut files);
+        for file in files {
+            h.update(file.to_string_lossy().as_bytes());
+            if let Ok(meta) = std::fs::metadata(&file) {
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                h.update(meta.len().to_le_bytes());
+                h.update(modified.to_le_bytes());
+            }
+            h.update([0]);
+        }
+    }
+    h.finalize()
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 pub fn installed(m: &Metadata) -> (Vec<Arc<CameraProfile>>, Vec<String>) {
     let listed = listed(m);
     (listed.profiles, listed.errors)
@@ -1223,6 +1257,25 @@ mod tests {
     /// never shadowing or shadowed: another cube's look, a look XMP (an Adobe name
     /// included), a DCP or RAWmakase's own profiles. A renamed one imports again as
     /// already imported.
+    #[test]
+    fn importing_or_removing_any_profile_changes_the_fingerprint() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let dest = temp.path().join("library");
+        std::fs::create_dir_all(&dest)?;
+        let dirs = [dest.clone()];
+        let empty = fingerprint_of(&dirs);
+        assert_eq!(fingerprint_of(&dirs), empty, "stable");
+        std::fs::write(
+            dest.join("mine.dcp"),
+            dcp("Test Camera", "Whatever I Called It"),
+        )?;
+        let one = fingerprint_of(&dirs);
+        assert_ne!(one, empty);
+        std::fs::remove_file(dest.join("mine.dcp"))?;
+        assert_eq!(fingerprint_of(&dirs), empty);
+        Ok(())
+    }
+
     #[test]
     fn a_name_collision_is_renamed_and_reported() -> Result<()> {
         let temp = tempfile::tempdir()?;
