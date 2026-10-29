@@ -10,6 +10,11 @@
 use anyhow::{Result, anyhow, bail};
 use rust_h265::{Decoder, Frame, PixelData, parse_hvcc, parse_nal};
 
+/// The largest `hvcC` read: its parameter sets take a few hundred bytes, and
+/// an encoder's SEI banner a kilobyte or two. Each tile's decoder reads it
+/// again, so a larger one could make a small file of many tiles slow.
+const MAX_CONFIG: usize = 16 << 10;
+
 /// What an `hvcC` (ISO/IEC 14496-15 HEVCDecoderConfigurationRecord) says.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Config {
@@ -24,9 +29,10 @@ pub(super) struct Config {
 }
 
 impl Config {
-    /// The record in `hvcc`; `None` when it is cut off or not version 1.
+    /// The record in `hvcc`; `None` when it is cut off, not version 1 or
+    /// over 16 KiB.
     pub(super) fn read(hvcc: &[u8]) -> Option<Self> {
-        if hvcc.len() < 23 || hvcc[0] != 1 {
+        if hvcc.len() < 23 || hvcc.len() > MAX_CONFIG || hvcc[0] != 1 {
             return None;
         }
         let length_size = (hvcc[21] & 3) + 1;
@@ -207,6 +213,10 @@ mod tests {
         let mut three = record;
         three[21] = 0x0e;
         assert_eq!(Config::read(&three), None);
+        // Nor is one larger than parameter sets and SEI take.
+        let large = vec![0x4e; 0xffff];
+        assert!(Config::read(&hvcc(&[&large[..MAX_CONFIG - 30]])).is_some());
+        assert_eq!(Config::read(&hvcc(&[&large[..MAX_CONFIG]])), None);
     }
 
     #[test]

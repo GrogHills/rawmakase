@@ -25,6 +25,7 @@ use image::metadata::Orientation;
 use rawmakase_interop::isobmff::{Heif, Property};
 use rayon::prelude::*;
 use std::path::Path;
+use std::sync::Arc;
 use yuv::{YuvPlanarImage, YuvRange};
 
 /// The most pixels decoded for an image, each of its tiles whole, as many as
@@ -35,7 +36,14 @@ const MAX_PIXELS: u64 = 150_000_000;
 /// one in fewer than its samples take at 16 bits, with room for the SEI an
 /// encoder adds. More is not a picture of that size, and is not read.
 fn coded_budget(width: u32, height: u32) -> u64 {
-    u64::from(width) * u64::from(height) * 6 + (64 << 10)
+    (u64::from(width) * u64::from(height))
+        .saturating_mul(6)
+        .saturating_add(64 << 10)
+}
+
+/// Whether `count` tiles of `size` take no more than [`MAX_PIXELS`] decoded.
+fn within_limit(count: usize, (w, h): (u32, u32)) -> bool {
+    count as u128 * u128::from(w) * u128::from(h) <= u128::from(MAX_PIXELS)
 }
 
 /// Where the image is in the decoded picture: its clean aperture.
@@ -53,8 +61,8 @@ struct Layout {
     width: u32,
     height: u32,
     /// The pictures, row by row, `columns` to a row: each item and its HEVC
-    /// configuration.
-    tiles: Vec<(u32, hevc::Config)>,
+    /// configuration, one for each item a grid lists however often.
+    tiles: Vec<(u32, Arc<hevc::Config>)>,
     columns: u32,
     /// Each picture's size.
     tile: (u32, u32),
@@ -91,7 +99,7 @@ impl HeicFile {
                 Layout {
                     width,
                     height,
-                    tiles: vec![(heif.primary, config)],
+                    tiles: vec![(heif.primary, Arc::new(config))],
                     columns: 1,
                     tile: (width, height),
                 }
@@ -101,9 +109,8 @@ impl HeicFile {
         };
         // Every tile is decoded whole, so the tiles, which cover the image,
         // bound the work.
-        let (tw, th) = layout.tile;
         ensure!(
-            layout.tiles.len() as u64 * u64::from(tw) * u64::from(th) <= MAX_PIXELS,
+            within_limit(layout.tiles.len(), layout.tile),
             "Image too large to preview"
         );
         let props = heif.properties(heif.primary);
@@ -161,7 +168,8 @@ impl HeicFile {
         } = &self.layout;
         let mut canvas: Option<hevc::Picture> = None;
         let batch = rayon::current_num_threads().max(1);
-        let budget = coded_budget(tile.0, tile.1);
+        // No more than the file holds either, however its extents overlap.
+        let budget = coded_budget(tile.0, tile.1).min(self.file.metadata()?.len());
         for (b, chunk) in tiles.chunks(batch).enumerate() {
             let data = chunk
                 .iter()
@@ -274,7 +282,8 @@ fn grid(heif: &Heif, file: &mut std::fs::File) -> Result<Layout> {
     let mut read = std::collections::HashMap::new();
     for id in &ids {
         if !read.contains_key(id) {
-            read.insert(*id, picture(heif, *id, true)?);
+            let (config, size) = picture(heif, *id, true)?;
+            read.insert(*id, (Arc::new(config), size));
         }
     }
     let tile = read[&ids[0]].1;
@@ -294,7 +303,10 @@ fn grid(heif: &Heif, file: &mut std::fs::File) -> Result<Layout> {
     Ok(Layout {
         width,
         height,
-        tiles: ids.iter().map(|id| (*id, read[id].0.clone())).collect(),
+        tiles: ids
+            .iter()
+            .map(|id| (*id, Arc::clone(&read[id].0)))
+            .collect(),
         columns,
         tile,
     })
@@ -602,6 +614,18 @@ mod tests {
                 height: 7
             }
         );
+    }
+
+    /// The tiles, decoded whole, are held to 150 MP, without overflowing
+    /// however large a tile says it is.
+    #[test]
+    fn tiles_are_held_to_150_megapixels() {
+        assert!(within_limit(192, (512, 512)));
+        assert!(within_limit(1, (12_247, 12_247)));
+        assert!(!within_limit(2, (8_661, 8_661)));
+        assert!(!within_limit(4, (1 << 31, 1 << 31)));
+        assert!(!within_limit(65_536, (u32::MAX, u32::MAX)));
+        assert_eq!(coded_budget(u32::MAX, u32::MAX), u64::MAX);
     }
 
     #[test]
