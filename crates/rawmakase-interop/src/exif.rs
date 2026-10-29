@@ -199,6 +199,79 @@ impl CameraExif {
     }
 }
 
+/// What a file's EXIF says of the colour of the images its camera rendered, and of
+/// the software that wrote it: ColorSpace (1 sRGB, 0xFFFF uncalibrated), the
+/// interoperability index ("R98" sRGB, "R03" Adobe RGB) and IFD0's Software.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ColourFacts {
+    pub color_space: Option<u16>,
+    pub interop_index: Option<String>,
+    pub software: Option<String>,
+}
+impl ColourFacts {
+    /// `self`'s facts, each from `other` where `self` has none.
+    pub fn or(self, other: Self) -> Self {
+        Self {
+            color_space: self.color_space.or(other.color_space),
+            interop_index: self.interop_index.or(other.interop_index),
+            software: self.software.or(other.software),
+        }
+    }
+}
+
+/// The [`ColourFacts`] of the file at `path` (a TIFF-based RAW, a JPEG…); `None`
+/// when its EXIF can't be read.
+pub fn colour_facts(path: &Path) -> Option<ColourFacts> {
+    match open_tiff(path)? {
+        Source::File(t) => colour_facts_in(t),
+        Source::Memory(t) => colour_facts_in(t),
+    }
+}
+
+/// The [`ColourFacts`] of the JPEG in `jpeg` (a RAW's embedded preview), from its
+/// own EXIF segment; `None` without one.
+pub fn colour_facts_of_jpeg(jpeg: &[u8]) -> Option<ColourFacts> {
+    let mut cursor = std::io::Cursor::new(jpeg);
+    let (at, len) = exif_in_jpeg(&mut cursor, 0, jpeg.len())?;
+    colour_facts_in(Tiff::open_within(std::io::Cursor::new(jpeg), at, len)?)
+}
+
+fn colour_facts_in<R: Read + Seek>(mut t: Tiff<R>) -> Option<ColourFacts> {
+    let text = |t: &mut Tiff<R>, e: &Entry| {
+        (e.kind == ASCII && e.count as usize <= MAX_VALUE)
+            .then(|| t.raw(e))
+            .flatten()
+            .map(|b| {
+                String::from_utf8_lossy(&b)
+                    .trim_end_matches('\0')
+                    .trim()
+                    .to_string()
+            })
+    };
+    let main = t.ifd(t.first)?;
+    let mut out = ColourFacts {
+        software: main.get(&SOFTWARE).and_then(|e| text(&mut t, e)),
+        ..Default::default()
+    };
+    if let Some(exif) = main
+        .get(&EXIF_IFD)
+        .and_then(|e| t.offset(e))
+        .and_then(|at| t.ifd(at))
+    {
+        out.color_space = exif
+            .get(&COLOR_SPACE)
+            .filter(|e| e.kind == SHORT && e.count == 1)
+            .map(|e| t.u16(&e.value));
+        // The interoperability directory's first tag, InteroperabilityIndex.
+        out.interop_index = exif
+            .get(&INTEROPERABILITY_IFD)
+            .and_then(|e| t.offset(e))
+            .and_then(|at| t.ifd(at))
+            .and_then(|ifd| ifd.get(&1).and_then(|e| text(&mut t, e)));
+    }
+    Some(out)
+}
+
 /// Main-directory tags an export keeps; it writes its own orientation, size and
 /// software.
 const MAIN: [u16; 5] = [IMAGE_DESCRIPTION, MAKE, MODEL, ARTIST, COPYRIGHT];
@@ -595,7 +668,7 @@ fn tiff_after_header<R: Read + Seek>(f: &mut R, at: u64, end: u64) -> Option<(u6
 /// Offset of the TIFF header inside a JPEG's EXIF segment, relative to the
 /// JPEG, and the length of the TIFF the segment holds. Only the first `length`
 /// bytes, at most 64 KB, are read.
-fn exif_in_jpeg(f: &mut File, jpeg: u64, length: usize) -> Option<(u64, u64)> {
+fn exif_in_jpeg(f: &mut (impl Read + Seek), jpeg: u64, length: usize) -> Option<(u64, u64)> {
     use std::io::{Cursor, SeekFrom};
     f.seek(SeekFrom::Start(jpeg)).ok()?;
     let mut head = vec![0u8; length.min(1 << 16)];
@@ -677,7 +750,7 @@ fn fields<R: Read + Seek>(
 
 #[cfg(test)]
 mod camera_names_tests {
-    use super::camera_names;
+    use super::{ColourFacts, camera_names, colour_facts, colour_facts_of_jpeg};
 
     /// A little-endian TIFF whose only directory holds Make and Model.
     fn tiff(make: &str, model: &str) -> Vec<u8> {
@@ -704,6 +777,64 @@ mod camera_names_tests {
         t.extend([0; 4]);
         t.extend(make.bytes().chain(model.bytes()));
         t
+    }
+
+    /// A JPEG whose EXIF says it is Adobe RGB (ColorSpace uncalibrated, the
+    /// interoperability index R03), written by `software`.
+    fn adobe_rgb_jpeg(software: &str) -> Vec<u8> {
+        let software = format!("{software}\0");
+        let entry = |tag: u16, kind: u16, count: u32, value: u32| {
+            let mut e = tag.to_le_bytes().to_vec();
+            e.extend(kind.to_le_bytes());
+            e.extend(count.to_le_bytes());
+            e.extend(value.to_le_bytes());
+            e
+        };
+        // IFD0 at 8 (two entries), the EXIF IFD at 38 (two), the interoperability
+        // IFD at 68 (one), then the software's text at 86.
+        let mut t = b"II*\0\x08\0\0\0".to_vec();
+        t.extend(2u16.to_le_bytes());
+        t.extend(entry(0x0131, 2, software.len() as u32, 86));
+        t.extend(entry(0x8769, 4, 1, 38));
+        t.extend([0; 4]);
+        t.extend(2u16.to_le_bytes());
+        t.extend(entry(0xa001, 3, 1, 0xffff));
+        t.extend(entry(0xa005, 4, 1, 68));
+        t.extend([0; 4]);
+        t.extend(1u16.to_le_bytes());
+        t.extend(entry(0x0001, 2, 4, u32::from_le_bytes(*b"R03\0")));
+        t.extend([0; 4]);
+        assert_eq!(t.len(), 86);
+        t.extend(software.bytes());
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        jpeg.extend(((t.len() + 8) as u16).to_be_bytes());
+        jpeg.extend(b"Exif\0\0");
+        jpeg.extend(t);
+        jpeg.extend([0xff, 0xd9]);
+        jpeg
+    }
+
+    #[test]
+    fn a_previews_colour_space_and_writer_are_read() {
+        let facts = colour_facts_of_jpeg(&adobe_rgb_jpeg("Adobe Photoshop Lightroom")).unwrap();
+        assert_eq!(
+            facts,
+            ColourFacts {
+                color_space: Some(0xffff),
+                interop_index: Some("R03".into()),
+                software: Some("Adobe Photoshop Lightroom".into()),
+            }
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jpg");
+        std::fs::write(&path, adobe_rgb_jpeg("Camera")).unwrap();
+        assert_eq!(
+            colour_facts(&path).unwrap().software.as_deref(),
+            Some("Camera")
+        );
+        assert_eq!(colour_facts_of_jpeg(&[0xff, 0xd8, 0xff, 0xd9]), None);
+        let none = ColourFacts::default();
+        assert_eq!(none.clone().or(facts.clone()), facts);
     }
 
     #[test]

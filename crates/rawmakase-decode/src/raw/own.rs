@@ -24,6 +24,13 @@ impl Own {
         let header = header(&info);
         Ok((Self { bytes, info }, header))
     }
+    /// The colour space the maker notes give the camera's JPEGs.
+    pub(super) fn preview_space(&self) -> Option<super::MakerPreviewSpace> {
+        self.info.preview_space.map(|s| match s {
+            rawmakase_raw::PreviewSpace::Srgb => super::MakerPreviewSpace::Srgb,
+            rawmakase_raw::PreviewSpace::AdobeRgb => super::MakerPreviewSpace::AdobeRgb,
+        })
+    }
     pub(super) fn thumbnail(&self) -> Result<Vec<u8>> {
         Ok(rawmakase_raw::preview(&self.info, &self.bytes)?.to_vec())
     }

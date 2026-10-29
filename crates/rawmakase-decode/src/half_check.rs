@@ -287,7 +287,7 @@ pub(crate) fn compare(full: &CameraImage, half: &CameraImage) -> (f64, f64, f64)
 }
 
 /// CIELAB (D65) of linear sRGB.
-fn lab([r, g, b]: [f64; 3]) -> [f64; 3] {
+pub(crate) fn lab([r, g, b]: [f64; 3]) -> [f64; 3] {
     let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
     let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
@@ -303,7 +303,7 @@ fn lab([r, g, b]: [f64; 3]) -> [f64; 3] {
 }
 
 /// CIEDE2000 colour difference (Sharma, Wu and Dalal 2005).
-fn delta_e2000(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
+pub(crate) fn delta_e2000(lab1: [f64; 3], lab2: [f64; 3]) -> f64 {
     let [l1, a1, b1] = lab1;
     let [l2, a2, b2] = lab2;
     let c_bar = (a1.hypot(b1) + a2.hypot(b2)) / 2.;

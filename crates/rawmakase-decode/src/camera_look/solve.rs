@@ -1,0 +1,672 @@
+//! Solving a fitted look (tone curve and HSV table) and a camera matrix from the
+//! pairs. Every loop runs in a fixed order, so a fit is the same on any machine
+//! with any number of threads.
+use super::Rgb;
+use rawmakase_model::{
+    camera_profiles::{
+        CameraProfile, default_tone_at,
+        fitted::{self, FittedLook, TABLE_DIMS},
+    },
+    color::{srgb_decode, srgb_encode},
+};
+use std::sync::OnceLock;
+
+type Matrix = [[f32; 3]; 3];
+const LUT: usize = 4096;
+
+fn clamp01(p: Rgb) -> Rgb {
+    p.map(|v| if v.is_finite() { v.clamp(0., 1.) } else { 0. })
+}
+/// A monotone LUT of 4097 samples over 0–1 at `x`, linearly between samples.
+fn at(lut: &[f32], x: f32) -> f32 {
+    let p = x.clamp(0., 1.) * LUT as f32;
+    let i = (p as usize).min(LUT - 1);
+    lut[i] + (lut[i + 1] - lut[i]) * (p - i as f32)
+}
+/// The inverse of the nondecreasing `f` on 0–1, as a LUT: for each output the
+/// middle of the inputs that reach it.
+fn inverse(f: impl Fn(f32) -> f32) -> Vec<f32> {
+    let ys: Vec<f32> = (0..=LUT).map(|i| f(i as f32 / LUT as f32)).collect();
+    (0..=LUT)
+        .map(|j| {
+            let v = j as f32 / LUT as f32;
+            let i = ys.partition_point(|y| *y < v);
+            if i == 0 {
+                return 0.;
+            }
+            if i > LUT {
+                return 1.;
+            }
+            let (a, b) = (ys[i - 1], ys[i]);
+            let t = if b > a { (v - a) / (b - a) } else { 0.5 };
+            (i as f32 - 1. + t) / LUT as f32
+        })
+        .collect()
+}
+/// The ACR3 base tone's inverse.
+fn base_inverse() -> &'static [f32] {
+    static LUT: OnceLock<Vec<f32>> = OnceLock::new();
+    LUT.get_or_init(|| inverse(default_tone_at))
+}
+/// `CameraProfile::finish`'s rule for a tone curve: the darkest and brightest
+/// channels through `f`, the middle one kept in its place between them.
+fn extrema(p: Rgb, f: impl Fn(f32) -> f32) -> Rgb {
+    let lo = p.iter().copied().fold(f32::INFINITY, f32::min);
+    let hi = p.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let (a, b) = (f(lo), f(hi));
+    if hi - lo > 1e-8 {
+        p.map(|v| a + (b - a) * (v - lo) / (hi - lo))
+    } else {
+        [a; 3]
+    }
+}
+/// The colour the look's table must make for the tone curves (the base's, then the
+/// look's `curve`, on encoded values) to give `target`.
+fn untoned(target: Rgb, curve_inverse: &[f32]) -> Rgb {
+    let e = extrema(clamp01(target).map(srgb_encode), |v| at(curve_inverse, v));
+    extrema(e.map(srgb_decode), |v| at(base_inverse(), v))
+}
+/// Hue (0–1), saturation and value as profile tables take them.
+fn hsv(p: Rgb) -> Rgb {
+    let max = p.iter().copied().fold(0f32, f32::max);
+    let min = p.iter().copied().fold(f32::INFINITY, f32::min).max(0.);
+    let d = max - min;
+    let h = if d < 1e-9 {
+        0.
+    } else if max == p[0] {
+        ((p[1] - p[2]) / d).rem_euclid(6.) / 6.
+    } else if max == p[1] {
+        ((p[2] - p[0]) / d + 2.) / 6.
+    } else {
+        ((p[0] - p[1]) / d + 4.) / 6.
+    };
+    [h, if max > 0. { d / max } else { 0. }, max]
+}
+
+/// The look's curve from `knots` of the composite tone (base tone then look curve):
+/// linear scene value to linear output, sorted, from (0, 0) to (1, 1).
+fn curve_from_composite(knots: &[(f32, f32)]) -> Vec<f32> {
+    let mut last = 0f32;
+    (0..=LUT)
+        .map(|i| {
+            let x = at(base_inverse(), srgb_decode(i as f32 / LUT as f32));
+            let v = srgb_encode(interpolate(knots, x)).clamp(last, 1.);
+            last = v;
+            v
+        })
+        .collect()
+}
+fn interpolate(knots: &[(f32, f32)], x: f32) -> f32 {
+    let i = knots
+        .partition_point(|k| k.0 <= x)
+        .clamp(1, knots.len() - 1);
+    let (a, b) = (knots[i - 1], knots[i]);
+    if b.0 > a.0 {
+        a.1 + (b.1 - a.1) * ((x - a.0) / (b.0 - a.0)).clamp(0., 1.)
+    } else {
+        b.1
+    }
+}
+/// Knots from (0, 0) to (1, 1) through `points` (sorted by x), each y at least the
+/// one before: monotone, the curve's ends fixed.
+fn monotone_knots(points: impl IntoIterator<Item = (f32, f32)>) -> Vec<(f32, f32)> {
+    let mut knots = vec![(0f32, 0f32)];
+    for (x, y) in points {
+        let last = *knots.last().expect("starts at 0");
+        if x > last.0 + 1e-5 && x < 1. - 1e-5 {
+            knots.push((x, y.clamp(last.1, 1.)));
+        }
+    }
+    knots.push((1., 1.));
+    knots
+}
+/// The `q` quantile of sorted `v`.
+fn quantile(v: &[f32], q: f32) -> f32 {
+    let i = (q * (v.len() - 1) as f32).round() as usize;
+    v[i.min(v.len() - 1)]
+}
+
+/// The starting curve: the i-th quantile of the scene's value (the brightest
+/// channel, which the tone curves map) goes to the i-th quantile of the preview's,
+/// at 32 knots.
+pub(super) fn quantile_curve(scene: &[Rgb], target: &[Rgb]) -> Vec<f32> {
+    let values = |v: &[Rgb], f: fn(Rgb) -> f32| {
+        let mut out: Vec<f32> = v.iter().map(|p| f(clamp01(*p))).collect();
+        out.sort_by(f32::total_cmp);
+        out
+    };
+    let brightest = |p: Rgb| p[0].max(p[1]).max(p[2]);
+    let (xs, ys) = (values(scene, brightest), values(target, brightest));
+    curve_from_composite(&monotone_knots(
+        (1..32).map(|k| (quantile(&xs, k as f32 / 32.), quantile(&ys, k as f32 / 32.))),
+    ))
+}
+/// The starting curve of a black and white look: luminance quantiles.
+pub(super) fn luminance_curve(scene: &[Rgb], target: &[Rgb]) -> Vec<f32> {
+    let values = |v: &[Rgb]| {
+        let mut out: Vec<f32> = v
+            .iter()
+            .map(|p| super::pairs::luminance(clamp01(*p)))
+            .collect();
+        out.sort_by(f32::total_cmp);
+        out
+    };
+    let (xs, ys) = (values(scene), values(target));
+    curve_from_composite(&monotone_knots(
+        (1..32).map(|k| (quantile(&xs, k as f32 / 32.), quantile(&ys, k as f32 / 32.))),
+    ))
+}
+
+/// The curve again for the table `look` has: the encoded extrema the look's curve
+/// receives against the preview's, binned into 32 equal-weight bins, made
+/// monotone (pool adjacent violators).
+fn refit_curve(base: &CameraProfile, look: &FittedLook, scene: &[Rgb], target: &[Rgb]) -> Vec<f32> {
+    let profile = fitted::with_look(base, look).expect("a valid look");
+    let mut points: Vec<(f32, f32, f32)> = Vec::with_capacity(scene.len() * 2);
+    for (s, t) in scene.iter().zip(target) {
+        let a = fitted::table_output(&profile, clamp01(*s));
+        let toned = extrema(a, default_tone_at).map(srgb_encode);
+        let t = clamp01(*t).map(srgb_encode);
+        let lo = |p: Rgb| p.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = |p: Rgb| p.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        points.push((hi(toned), hi(t), 1.));
+        points.push((lo(toned), lo(t), 0.5));
+    }
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total: f32 = points.iter().map(|p| p.2).sum();
+    let mut bins: Vec<[f64; 3]> = Vec::new();
+    let (mut acc, mut next) = ([0f64; 3], total / 32.);
+    let mut seen = 0f32;
+    for (u, y, w) in points {
+        let w64 = f64::from(w);
+        acc = [
+            acc[0] + w64 * f64::from(u),
+            acc[1] + w64 * f64::from(y),
+            acc[2] + w64,
+        ];
+        seen += w;
+        if seen >= next {
+            bins.push(acc);
+            acc = [0.; 3];
+            next += total / 32.;
+        }
+    }
+    if acc[2] > 0. {
+        bins.push(acc);
+    }
+    // Pool adjacent violators over the bins' means.
+    let mut pooled: Vec<[f64; 3]> = Vec::new();
+    for b in bins {
+        pooled.push(b);
+        while pooled.len() > 1 {
+            let n = pooled.len();
+            let (p, q) = (pooled[n - 2], pooled[n - 1]);
+            if p[1] / p[2] <= q[1] / q[2] {
+                break;
+            }
+            pooled.truncate(n - 2);
+            pooled.push([p[0] + q[0], p[1] + q[1], p[2] + q[2]]);
+        }
+    }
+    let knots = monotone_knots(
+        pooled
+            .iter()
+            .map(|b| ((b[0] / b[2]) as f32, (b[1] / b[2]) as f32)),
+    );
+    let mut last = 0f32;
+    (0..=LUT)
+        .map(|i| {
+            let v = interpolate(&knots, i as f32 / LUT as f32).clamp(last, 1.);
+            last = v;
+            v
+        })
+        .collect()
+}
+
+/// The table's kernels, in node units: hue 2.5° (nodes 5° apart), saturation 0.15
+/// and encoded value 0.12 (nodes 1/7 apart); and the shrinkage towards no change.
+const SIGMA: [f32; 3] = [0.5, 0.15 * 7., 0.12 * 7.];
+const SHRINK: f64 = 5.;
+/// The most a node may shift hue (degrees), and scale saturation and value (as a
+/// natural logarithm).
+const LIMITS: [f32; 3] = [30., 0.7, 0.7];
+
+/// One round of the table: each sample's remaining hue, saturation and value
+/// change, from what the current table makes of it to what the curves need, spread
+/// to the nodes around where it enters the table, and added to the nodes.
+fn refine_table(base: &CameraProfile, look: &mut FittedLook, scene: &[Rgb], target: &[Rgb]) {
+    let profile = fitted::with_look(base, look).expect("a valid look");
+    let curve_inverse = inverse(|v| at(&look.curve, v));
+    let [nh, ns, nv] = TABLE_DIMS;
+    let mut sums = vec![[0f64; 3]; nh * ns * nv];
+    let mut weights = vec![[0f64; 2]; nh * ns * nv];
+    for (s, t) in scene.iter().zip(target) {
+        let input = clamp01(*s);
+        let [h, sat, v] = hsv(input);
+        let made = hsv(fitted::table_output(&profile, input));
+        let wanted = hsv(untoned(*t, &curve_inverse));
+        let d_hue = ((wanted[0] - made[0] + 0.5).rem_euclid(1.) - 0.5) * 360.;
+        let colour = (sat > 0.05 && made[1] > 0.02 && wanted[1] > 0.)
+            .then(|| [f64::from(d_hue), f64::from((wanted[1] / made[1]).ln())]);
+        let value = (made[2] > 1e-3 && wanted[2] > 1e-4)
+            .then(|| f64::from((srgb_encode(wanted[2]) / srgb_encode(made[2])).ln()));
+        let at = [
+            h * nh as f32,
+            sat * (ns - 1) as f32,
+            srgb_encode(v) * (nv - 1) as f32,
+        ];
+        let reach = SIGMA.map(|s| (3. * s).ceil() as i32);
+        let centre = at.map(|v| v.round() as i32);
+        for dz in -reach[2]..=reach[2] {
+            let iz = centre[2] + dz;
+            if iz < 0 || iz >= nv as i32 {
+                continue;
+            }
+            let wz = gauss(iz as f32 - at[2], SIGMA[2]);
+            for dy in -reach[1]..=reach[1] {
+                let iy = centre[1] + dy;
+                if iy < 1 || iy >= ns as i32 {
+                    continue;
+                }
+                let wy = gauss(iy as f32 - at[1], SIGMA[1]);
+                for dx in -reach[0]..=reach[0] {
+                    let ix = (centre[0] + dx).rem_euclid(nh as i32);
+                    let dh = ((ix as f32 - at[0] + nh as f32 / 2.).rem_euclid(nh as f32))
+                        - nh as f32 / 2.;
+                    let w = f64::from(gauss(dh, SIGMA[0]) * wy * wz);
+                    let node = (iz as usize * nh + ix as usize) * ns + iy as usize;
+                    if let Some([dh, ds]) = colour {
+                        // Hue and saturation are as sure as the colour is saturated.
+                        let wc = w * f64::from(sat);
+                        sums[node][0] += wc * dh;
+                        sums[node][1] += wc * ds;
+                        weights[node][0] += wc;
+                    }
+                    if let Some(dv) = value {
+                        sums[node][2] += w * dv;
+                        weights[node][1] += w;
+                    }
+                }
+            }
+        }
+    }
+    for (node, entry) in look.table.iter_mut().enumerate() {
+        if node % ns == 0 {
+            // The neutral column stays as it is: grey's tone is the curve's.
+            *entry = [0., 1., 1.];
+            continue;
+        }
+        let [w_colour, w_value] = weights[node];
+        let step = [
+            sums[node][0] / (w_colour + SHRINK),
+            sums[node][1] / (w_colour + SHRINK),
+            sums[node][2] / (w_value + SHRINK),
+        ];
+        let now = [entry[0], entry[1].ln(), entry[2].ln()];
+        let next: [f32; 3] =
+            std::array::from_fn(|c| (now[c] + step[c] as f32).clamp(-LIMITS[c], LIMITS[c]));
+        *entry = [next[0], next[1].exp(), next[2].exp()];
+    }
+}
+fn gauss(d: f32, sigma: f32) -> f32 {
+    (-0.5 * (d / sigma).powi(2)).exp()
+}
+
+/// The look over `base` taking `scene` (linear ProPhoto leaving the scene tone
+/// stage) to `target` (the preview's linear ProPhoto): the quantile curve, then
+/// alternately the table and the curve through the profile's own operators.
+pub(super) fn colour_look(base: &CameraProfile, scene: &[Rgb], target: &[Rgb]) -> FittedLook {
+    let mut look = FittedLook {
+        curve: quantile_curve(scene, target),
+        ..FittedLook::identity()
+    };
+    for round in 0..3 {
+        for _ in 0..2 {
+            refine_table(base, &mut look, scene, target);
+        }
+        if round < 2 {
+            look.curve = refit_curve(base, &look, scene, target);
+        }
+    }
+    look
+}
+/// A look of the curve alone, the table unchanged.
+pub(super) fn tone_look(base: &CameraProfile, scene: &[Rgb], target: &[Rgb]) -> FittedLook {
+    let mut look = FittedLook {
+        curve: quantile_curve(scene, target),
+        ..FittedLook::identity()
+    };
+    look.curve = refit_curve(base, &look, scene, target);
+    look
+}
+/// A black and white look: a luminance curve, and monochrome.
+pub(super) fn monochrome_look(scene: &[Rgb], target: &[Rgb]) -> FittedLook {
+    FittedLook {
+        curve: luminance_curve(scene, target),
+        monochrome: true,
+        ..FittedLook::identity()
+    }
+}
+
+/// D50's white, where a forward matrix takes the camera's neutral.
+const D50: [f64; 3] = [0.9642, 1., 0.8249];
+
+/// A forward matrix from white-balanced camera RGB to XYZ D50, fitted to the
+/// preview's colour. The camera's tone curve changes how bright each colour is, not
+/// its direction, so each fitted colour is asked only to point where the preview's
+/// does (their cross product, of both at unit length, is least), with a ridge of
+/// 10⁻⁴ of the data's trace, and the matrix must take camera neutral [1, 1, 1] to
+/// D50 white with Y = 1, as a DNG ForwardMatrix does. Refused when a coefficient
+/// reaches 8 or the matrix is badly conditioned (condition number 10⁶).
+pub(super) fn forward_matrix(camera: &[Rgb], xyz: &[Rgb]) -> Result<Matrix, String> {
+    let unit = |v: Rgb| {
+        let v = v.map(f64::from);
+        let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        v.map(|x| x / n)
+    };
+    let pairs: Vec<([f64; 3], [f64; 3])> = camera
+        .iter()
+        .zip(xyz)
+        .filter(|(c, t)| c.iter().all(|v| *v > 1e-4) && t[1] > 1e-3)
+        .map(|(c, t)| (unit(*c), unit(*t)))
+        .collect();
+    if pairs.len() < 64 {
+        return Err("Too few colours to fit a matrix".into());
+    }
+    // m, row by row, as x[3r + j]; each sample's (m c) × t is linear in x.
+    let mut h = [[0f64; 9]; 9];
+    for (c, t) in &pairs {
+        let mut rows = [[0f64; 9]; 3];
+        for j in 0..3 {
+            rows[0][3 + j] = c[j] * t[2];
+            rows[0][6 + j] = -c[j] * t[1];
+            rows[1][6 + j] = c[j] * t[0];
+            rows[1][j] = -c[j] * t[2];
+            rows[2][j] = c[j] * t[1];
+            rows[2][3 + j] = -c[j] * t[0];
+        }
+        for row in &rows {
+            for i in 0..9 {
+                for k in 0..9 {
+                    h[i][k] += row[i] * row[k];
+                }
+            }
+        }
+    }
+    let ridge = 1e-4 * (0..9).map(|i| h[i][i]).sum::<f64>();
+    // Minimise xᵀ H x with each row summing to D50's: the KKT system.
+    let mut kkt = vec![vec![0f64; 13]; 12];
+    for i in 0..9 {
+        for k in 0..9 {
+            kkt[i][k] = h[i][k] + if i == k { ridge } else { 0. };
+        }
+    }
+    for r in 0..3 {
+        for j in 0..3 {
+            kkt[9 + r][3 * r + j] = 1.;
+            kkt[3 * r + j][9 + r] = 1.;
+        }
+        kkt[9 + r][12] = D50[r];
+    }
+    let x = gauss_solve(kkt).ok_or("Singular colour data")?;
+    let m: [[f64; 3]; 3] = std::array::from_fn(|r| std::array::from_fn(|j| x[3 * r + j]));
+    if !m.iter().flatten().all(|v| v.is_finite() && v.abs() < 8.) {
+        return Err("The fitted matrix has a coefficient beyond 8".into());
+    }
+    let inv = invert(m).ok_or("The fitted matrix is singular")?;
+    let norm = |m: &[[f64; 3]; 3]| m.iter().flatten().map(|v| v * v).sum::<f64>().sqrt();
+    if norm(&m) * norm(&inv) >= 1e6 {
+        return Err("The fitted matrix is badly conditioned".into());
+    }
+    Ok(m.map(|r| r.map(|v| v as f32)))
+}
+/// The solution of the augmented system `a` (each row its coefficients, then the
+/// right-hand side), by Gaussian elimination with partial pivoting.
+fn gauss_solve(mut a: Vec<Vec<f64>>) -> Option<Vec<f64>> {
+    let n = a.len();
+    for col in 0..n {
+        let pivot = (col..n).max_by(|i, j| a[*i][col].abs().total_cmp(&a[*j][col].abs()))?;
+        if a[pivot][col].abs() < 1e-14 {
+            return None;
+        }
+        a.swap(col, pivot);
+        let (top, rest) = a.split_at_mut(col + 1);
+        let pivot_row = &top[col];
+        for row in rest {
+            let f = row[col] / pivot_row[col];
+            for (v, p) in row[col..].iter_mut().zip(&pivot_row[col..]) {
+                *v -= f * p;
+            }
+        }
+    }
+    let mut x = vec![0f64; n];
+    for i in (0..n).rev() {
+        let sum: f64 = (i + 1..n).map(|k| a[i][k] * x[k]).sum();
+        x[i] = (a[i][n] - sum) / a[i][i];
+    }
+    x.iter().all(|v| v.is_finite()).then_some(x)
+}
+fn invert(m: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
+    let [a, b, c] = m;
+    let det = a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+        + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return None;
+    }
+    let cof =
+        |r0: usize, r1: usize, c0: usize, c1: usize| m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0];
+    Some([
+        [
+            cof(1, 2, 1, 2) / det,
+            -cof(0, 2, 1, 2) / det,
+            cof(0, 1, 1, 2) / det,
+        ],
+        [
+            -cof(1, 2, 0, 2) / det,
+            cof(0, 2, 0, 2) / det,
+            -cof(0, 1, 0, 2) / det,
+        ],
+        [
+            cof(1, 2, 0, 1) / det,
+            -cof(0, 2, 0, 1) / det,
+            cof(0, 1, 0, 1) / det,
+        ],
+    ])
+}
+
+/// The unconstrained reference fit the representation is measured against: the
+/// fitted look's render plus a free correction of its remaining error on a 17³
+/// lattice over the encoded scene colour, by Gaussian kernels one node wide and
+/// shrunk towards no correction. The look's representation (an HSV table and
+/// extrema curves) cannot make what the correction adds.
+pub(super) struct Lattice {
+    profile: CameraProfile,
+    data: Vec<Rgb>,
+}
+const LATTICE: usize = 17;
+impl Lattice {
+    pub(super) fn fit(profile: &CameraProfile, scene: &[Rgb], target_srgb: &[Rgb]) -> Self {
+        let n = LATTICE;
+        let step = (n - 1) as f32;
+        let mut sums = vec![[0f64; 4]; n * n * n];
+        for (s, t) in scene.iter().zip(target_srgb) {
+            let made = clamp01(profile.finish(*s));
+            let t = clamp01(*t);
+            let at = clamp01(*s).map(|v| srgb_encode(v) * step);
+            let centre = at.map(|v| v.round() as i32);
+            for dz in -2..=2 {
+                for dy in -2..=2 {
+                    for dx in -2..=2 {
+                        let k = [centre[0] + dx, centre[1] + dy, centre[2] + dz];
+                        if k.iter().any(|v| *v < 0 || *v >= n as i32) {
+                            continue;
+                        }
+                        let d2: f32 = (0..3).map(|c| (k[c] as f32 - at[c]).powi(2)).sum();
+                        let w = f64::from((-0.5 * d2).exp());
+                        let i = (k[2] as usize * n + k[1] as usize) * n + k[0] as usize;
+                        for c in 0..3 {
+                            sums[i][c] += w * f64::from(t[c] - made[c]);
+                        }
+                        sums[i][3] += w;
+                    }
+                }
+            }
+        }
+        let data = sums
+            .iter()
+            .map(|s| std::array::from_fn(|c| (s[c] / (s[3] + 2.)) as f32))
+            .collect();
+        Self {
+            profile: profile.clone(),
+            data,
+        }
+    }
+    /// The look's render of scene colour `s` with the correction there, trilinearly.
+    pub(super) fn apply(&self, s: Rgb) -> Rgb {
+        let n = LATTICE;
+        let at = clamp01(s).map(|v| srgb_encode(v) * (n - 1) as f32);
+        let base = at.map(|v| (v.floor() as usize).min(n - 2));
+        let f: [f32; 3] = std::array::from_fn(|c| at[c] - base[c] as f32);
+        let mut out = clamp01(self.profile.finish(s));
+        for corner in 0..8 {
+            let o = [corner & 1, corner >> 1 & 1, corner >> 2 & 1];
+            let w: f32 = (0..3)
+                .map(|c| if o[c] == 1 { f[c] } else { 1. - f[c] })
+                .product();
+            let i = ((base[2] + o[2]) * n + base[1] + o[1]) * n + base[0] + o[0];
+            for (o, v) in out.iter_mut().zip(self.data[i]) {
+                *o += w * v;
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rawmakase_model::camera_data::Metadata;
+
+    fn base() -> CameraProfile {
+        fitted::standard_base(&Metadata {
+            make: "Test".into(),
+            model: "Camera".into(),
+            cam_xyz: [[0.8, -0.2, -0.1], [-0.4, 1.2, 0.2], [-0.05, 0.2, 0.6]],
+            ..Default::default()
+        })
+        .unwrap()
+    }
+    /// Colours spread over the gamut, as a scene's would be, in a fixed order.
+    fn scene() -> Vec<Rgb> {
+        let mut seed = 12345u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        (0..6000)
+            .map(|_| {
+                let v = 0.02 + 0.6 * next().powi(2);
+                let s = next() * 0.8;
+                let h = next();
+                [h, (h + 0.33) % 1., (h + 0.66) % 1.]
+                    .map(|x| v * (1. - s * (0.5 + 0.5 * (x * std::f32::consts::TAU).cos())))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_known_look_is_recovered() {
+        let base = base();
+        // A look with a curve and a hue-dependent shift: what a camera might do.
+        let mut known = FittedLook::identity();
+        known.curve = (0..=LUT)
+            .map(|i| {
+                let x = i as f32 / LUT as f32;
+                x + 0.15 * x * (1. - x) * (1. - 2. * x)
+            })
+            .collect();
+        let [nh, ns, nv] = TABLE_DIMS;
+        for z in 0..nv {
+            for x in 0..nh {
+                for y in 1..ns {
+                    let hue = x as f32 / nh as f32 * std::f32::consts::TAU;
+                    known.table[(z * nh + x) * ns + y] =
+                        [8. * hue.sin(), 1. + 0.2 * hue.cos(), 1. + 0.05 * hue.sin()];
+                }
+            }
+        }
+        let truth = fitted::with_look(&base, &known).unwrap();
+        let scene = scene();
+        let target: Vec<Rgb> = scene
+            .iter()
+            .map(|s| {
+                rawmakase_model::color::mul(
+                    rawmakase_model::camera_profiles::RGB_TO_PRO,
+                    truth.finish(*s),
+                )
+            })
+            .collect();
+        let rms = |look: &FittedLook| {
+            let p = fitted::with_look(&base, look).unwrap();
+            let sse: f32 = scene
+                .iter()
+                .zip(&target)
+                .map(|(s, t)| {
+                    let got = rawmakase_model::color::mul(
+                        rawmakase_model::camera_profiles::RGB_TO_PRO,
+                        p.finish(*s),
+                    );
+                    (0..3).map(|c| (got[c] - t[c]).powi(2)).sum::<f32>()
+                })
+                .sum();
+            (sse / (3 * scene.len()) as f32).sqrt()
+        };
+        let before = rms(&FittedLook::identity());
+        let fit = colour_look(&base, &scene, &target);
+        let after = rms(&fit);
+        assert!(after < 0.25 * before && after < 0.01, "{before} → {after}");
+        // The same fit again, to the bit.
+        assert_eq!(colour_look(&base, &scene, &target), fit);
+    }
+
+    #[test]
+    fn a_known_matrix_is_recovered_whatever_the_tone() {
+        let truth: Matrix = [
+            [0.7, 0.2, 0.0642],
+            [0.25, 0.8, -0.05],
+            [0.02, -0.15, 0.9549],
+        ];
+        let camera = scene();
+        // The preview's colour, through a tone curve that changes each colour's
+        // brightness but not its chromaticity.
+        let xyz: Vec<Rgb> = camera
+            .iter()
+            .map(|c| {
+                let x = rawmakase_model::color::mul(truth, *c);
+                let k = (x[1].max(1e-6)).powf(-0.4);
+                x.map(|v| v * k)
+            })
+            .collect();
+        let m = forward_matrix(&camera, &xyz).unwrap();
+        for (a, b) in m.iter().flatten().zip(truth.iter().flatten()) {
+            assert!((a - b).abs() < 1e-2, "{m:?}");
+        }
+        let white = rawmakase_model::color::mul(m, [1.; 3]);
+        assert!(
+            (white[1] - 1.).abs() < 1e-4 && (white[0] - 0.9642).abs() < 1e-4,
+            "{white:?}"
+        );
+        assert!(forward_matrix(&camera[..10], &xyz[..10]).is_err());
+    }
+
+    #[test]
+    fn the_quantile_curve_is_monotone_with_fixed_ends() {
+        let scene = scene();
+        let target: Vec<Rgb> = scene.iter().map(|p| p.map(|v| v.sqrt())).collect();
+        let curve = quantile_curve(&scene, &target);
+        assert_eq!(curve.len(), LUT + 1);
+        assert_eq!(curve[0], 0.);
+        assert!((curve[LUT] - 1.).abs() < 1e-6);
+        assert!(curve.windows(2).all(|w| w[0] <= w[1]));
+    }
+}

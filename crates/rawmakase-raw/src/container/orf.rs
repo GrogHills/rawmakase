@@ -135,6 +135,7 @@ pub(crate) fn open(t: TiffFile) -> Result<RawInfo> {
     info.previews = t.previews();
     info.uncompressed_preview = t.has_uncompressed_thumbnail();
     let notes = olympus::read(&t).unwrap_or_default();
+    info.preview_space = notes.color_space;
     info.cam_mul = notes.cam_mul;
     info.presets = notes.presets;
     if info.lens.is_empty()

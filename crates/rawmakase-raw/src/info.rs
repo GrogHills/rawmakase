@@ -4,6 +4,15 @@ use crate::variant::Variant;
 /// A crop position that is not known.
 pub const UNSET: u32 = 0xffff;
 
+/// The colour space a camera rendered its embedded JPEGs in, as its maker notes
+/// say (Nikon's ColorSpace, Olympus's CameraSettings ColorSpace), where the EXIF
+/// may not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PreviewSpace {
+    Srgb,
+    AdobeRgb,
+}
+
 /// Where the colour matrix in [`RawInfo::cam_xyz`] comes from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum MatrixSource {
@@ -109,6 +118,8 @@ pub struct RawInfo {
     pub cam_xyz: [[f32; 3]; 3],
     /// Where `cam_xyz` comes from.
     pub matrix_source: MatrixSource,
+    /// The colour space of the camera's JPEGs, when the maker notes say it.
+    pub preview_space: Option<PreviewSpace>,
     /// Camera to sRGB primaries (rows sum to one).
     pub rgb_cam: [[f32; 3]; 3],
     pub lens: String,
@@ -239,6 +250,7 @@ pub(crate) fn base(variant: Variant) -> RawInfo {
         presets: Presets::default(),
         cam_xyz: [[0.; 3]; 3],
         matrix_source: MatrixSource::Absent,
+        preview_space: None,
         rgb_cam: [[0.; 3]; 3],
         lens: String::new(),
         lens_id: 0,

@@ -171,6 +171,7 @@ pub(crate) fn open(bytes: &[u8], t: TiffFile) -> Result<RawInfo> {
     }
     info.presets = notes.presets;
     info.lens_id = notes.lens_id;
+    info.preview_space = notes.color_space;
     let inside =
         |start: u32, len: u32, total: u32| start.checked_add(len).is_some_and(|e| e <= total);
     info.frame = match notes.crop {

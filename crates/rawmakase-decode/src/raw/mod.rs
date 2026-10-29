@@ -373,6 +373,11 @@ impl Raw {
             facts,
         })
     }
+    /// The colour space the camera's maker notes give its JPEGs (Nikon's and
+    /// Olympus's ColorSpace), for a preview whose EXIF does not say it.
+    pub fn maker_preview_space(&self) -> Option<MakerPreviewSpace> {
+        self.own.preview_space()
+    }
     /// The embedded JPEG preview, as stored.
     pub fn thumbnail(&mut self) -> Result<Vec<u8>> {
         self.own.thumbnail()
@@ -626,6 +631,17 @@ fn sony_frame(
 pub fn thumbnail(raw: &mut Raw) -> anyhow::Result<image::RgbImage> {
     let bytes = raw.thumbnail()?;
     preview_image(bytes, raw.metadata.flip)
+}
+/// A camera JPEG's colour space as its maker notes give it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MakerPreviewSpace {
+    Srgb,
+    AdobeRgb,
+}
+/// Whether an embedded preview's `bytes` (`Raw::thumbnail`'s) are JPEG XL, which
+/// Lightroom writes into DNGs, rather than a camera's JPEG.
+pub fn is_jpeg_xl(bytes: &[u8]) -> bool {
+    rawmakase_raw::is_jpeg_xl(bytes, 0)
 }
 /// The most pixels a JPEG XL preview may claim: a 100-megapixel camera's.
 /// Its header is read before any pixel, so a hostile one is refused before
