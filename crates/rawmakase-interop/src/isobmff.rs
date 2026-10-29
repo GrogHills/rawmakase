@@ -390,6 +390,28 @@ impl Heif {
         Some(data)
     }
 
+    /// Whether item `id`'s data is all there, in the file or the `idat` box,
+    /// without reading it: what a decoder that reads the file itself would
+    /// otherwise find cut off.
+    pub fn stored_within<R: Seek>(&self, r: &mut R, id: u32) -> bool {
+        let Some(l) = self.locations.iter().find(|l| l.id == id && l.method <= 1) else {
+            return false;
+        };
+        let Some(end) = (match l.method {
+            0 => file_len(r),
+            _ => Some(self.idat.len() as u64),
+        }) else {
+            return false;
+        };
+        !l.extents.is_empty()
+            && l.extents.iter().all(|(offset, len)| {
+                l.base
+                    .checked_add(*offset)
+                    .and_then(|at| at.checked_add(*len))
+                    .is_some_and(|e| *len > 0 && e <= end)
+            })
+    }
+
     /// The items with a `kind` reference to item `of`: for "cdsc", the
     /// metadata that describes it.
     pub fn describing(&self, kind: [u8; 4], of: u32) -> Vec<u32> {
@@ -777,6 +799,35 @@ mod tests {
         let file = [bx(b"ftyp", b"heic\0\0\0\0mif1"), bx(b"meta", &meta)].concat();
         let mut r = Cursor::new(&file);
         assert_eq!(Heif::read(&mut r).unwrap().data(&mut r, 1), None);
+    }
+
+    #[test]
+    fn an_item_is_stored_within_the_file_only_when_all_its_extents_are() {
+        let mut f = fixture("rotated.avif");
+        let heif = Heif::read(&mut f).unwrap();
+        assert!(heif.stored_within(&mut f, heif.primary));
+        assert!(!heif.stored_within(&mut f, 999));
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/data/formats/rotated.avif"),
+        )
+        .unwrap();
+        let mut cut = Cursor::new(bytes[..bytes.len() - 1].to_vec());
+        assert!(!heif.stored_within(&mut cut, heif.primary));
+        // In idat: within the box, and past it.
+        let mut iloc = vec![1, 0, 0, 0, 0x44, 0x00, 0, 1];
+        iloc.extend([0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 4]);
+        let meta = [vec![0; 4], bx(b"iloc", &iloc), bx(b"idat", b"abcdef")].concat();
+        let file = [bx(b"ftyp", b"heic\0\0\0\0mif1"), bx(b"meta", &meta)].concat();
+        let mut r = Cursor::new(&file);
+        let heif = Heif::read(&mut r).unwrap();
+        assert!(heif.stored_within(&mut r, 1));
+        let mut past = iloc.clone();
+        past[23] = 5;
+        let meta = [vec![0; 4], bx(b"iloc", &past), bx(b"idat", b"abcdef")].concat();
+        let file = [bx(b"ftyp", b"heic\0\0\0\0mif1"), bx(b"meta", &meta)].concat();
+        let mut r = Cursor::new(&file);
+        assert!(!Heif::read(&mut r).unwrap().stored_within(&mut r, 1));
     }
 
     #[test]

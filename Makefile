@@ -19,6 +19,8 @@ check:
 	cargo fmt --check
 	cargo clippy --locked --workspace --all-targets -- -D warnings
 	cargo test --locked -p rawmakase -p rawmakase-decode -p rawmakase-export
+	cargo clippy --locked --all-targets --no-default-features -p rawmakase -p rawmakase-decode -- -D warnings
+	cargo test --locked --no-default-features -p rawmakase-decode
 	cargo clippy --locked --all-targets -p rawmakase-tiff -p rawmakase-raw -p rawmakase-model -p rawmakase-interop -p rawmakase-catalog -p rawmakase-engine -p rawmakase-protocol -p rawmakase-ctl -- -D warnings
 	cargo test --locked -p rawmakase-model --all-features
 	cargo test --locked -p rawmakase-tiff -p rawmakase-raw -p rawmakase-interop -p rawmakase-catalog -p rawmakase-engine

@@ -1324,16 +1324,24 @@ mod tests {
     }
 
     /// A PQ HEIC is shown, its reference white as white, but not edited; nor
-    /// is a still in a file whose brands say it holds a sequence.
-    #[cfg(any(target_os = "macos", all(feature = "software-hevc", not(windows))))]
+    /// is a still in a file whose brands say it holds a sequence. The
+    /// refusals come from the header, wherever the pixels come from; how an
+    /// HDR picture's preview looks, and whether a system decoder shows a still
+    /// it takes for a sequence, are its own.
+    #[cfg(any(target_os = "macos", windows, feature = "software-hevc"))]
     #[test]
     fn hdr_and_sequence_heics_are_refused_for_develop() {
         assert_eq!(super::probe(&fixture("pq.heic")).unwrap_err().0, "HDR");
-        let image = decode(&fixture("pq.heic")).unwrap();
-        // The grey as hdr_previews_show_reference_white_as_white's, within
-        // lossy 4:2:0's error.
-        let centre = image.get_pixel(8, 6).0;
-        assert!(centre.iter().all(|v| v.abs_diff(183) <= 6), "{centre:?}");
+        if cfg!(all(
+            feature = "software-hevc",
+            not(any(target_os = "macos", windows))
+        )) {
+            let image = decode(&fixture("pq.heic")).unwrap();
+            // The grey as hdr_previews_show_reference_white_as_white's, within
+            // lossy 4:2:0's error.
+            let centre = image.get_pixel(8, 6).0;
+            assert!(centre.iter().all(|v| v.abs_diff(183) <= 6), "{centre:?}");
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sequence.heic");
         let mut bytes = std::fs::read(fixture("metadata.heic")).unwrap();
@@ -1341,12 +1349,18 @@ mod tests {
         bytes[at..at + 4].copy_from_slice(b"msf1");
         std::fs::write(&path, bytes).unwrap();
         assert_eq!(super::probe(&path).unwrap_err().0, "animated");
-        assert!(decode(&path).is_ok());
+        if cfg!(all(
+            feature = "software-hevc",
+            not(any(target_os = "macos", windows))
+        )) {
+            assert!(decode(&path).is_ok());
+        }
     }
 
     /// The size and the refusal come from a HEIC's header: its HEVC data is
-    /// read only to decode it.
-    #[cfg(any(target_os = "macos", all(feature = "software-hevc", not(windows))))]
+    /// read only to decode it, and a picture cut short is an error on every
+    /// platform, whatever a system decoder would make of it.
+    #[cfg(any(target_os = "macos", windows, feature = "software-hevc"))]
     #[test]
     fn a_heic_header_is_read_without_its_image_data() {
         let dir = tempfile::tempdir().unwrap();
@@ -1470,7 +1484,7 @@ mod tests {
 
     /// A build without a HEVC decoder lists a HEIC with its size, but Develop
     /// refuses it and decoding says why.
-    #[cfg(not(any(target_os = "macos", all(feature = "software-hevc", not(windows)))))]
+    #[cfg(not(any(target_os = "macos", windows, feature = "software-hevc")))]
     #[test]
     fn without_a_decoder_a_heic_is_listed_but_refused() {
         assert_eq!(super::dimensions(&fixture("grid.heic")), Some((120, 100)));

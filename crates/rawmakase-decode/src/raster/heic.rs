@@ -17,9 +17,11 @@
 //! The colour comes from the `colr` boxes of the image, or of its first tile
 //! when the image has none of that kind (an iPhone's tiles carry the `nclx`):
 //! an ICC profile, or one built from the CICP code points; a HEIC with neither
-//! is taken as sRGB. The matrix and range come from the `nclx` box; without
-//! one they are taken as BT.601 and full range, what phones and libheif write
-//! (the HEVC header's own are not read). Alpha, depth maps, gain maps and thumbnails are not read.
+//! is taken as sRGB. For RAWmakase's own decoder the matrix and range come
+//! from the `nclx` box; without one they are taken as BT.601 and full range,
+//! what phones and libheif write (the HEVC header's own are not read); a
+//! system decoder chooses them itself. Alpha, depth maps, gain maps and
+//! thumbnails are not read.
 use super::avif::{self, Nclx};
 use super::{Unsupported, hevc};
 use anyhow::{Result, anyhow, bail, ensure};
@@ -103,15 +105,7 @@ pub(super) struct HeicFile {
     #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     path: std::path::PathBuf,
     /// The file and its boxes, to read the pictures from when decoding.
-    #[cfg_attr(
-        not(all(feature = "software-hevc", not(any(target_os = "macos", windows)))),
-        allow(dead_code)
-    )]
     file: std::fs::File,
-    #[cfg_attr(
-        not(all(feature = "software-hevc", not(any(target_os = "macos", windows)))),
-        allow(dead_code)
-    )]
     heif: Heif,
     layout: Layout,
     icc: Option<Vec<u8>>,
@@ -165,10 +159,9 @@ impl HeicFile {
             "The HEIF image's tiles differ in depth or chroma"
         );
         let animated = [b"msf1", b"hevc", b"hevx", b"hevm", b"hevs"];
-        // rust_h265 decodes 4:2:0 and 4:4:4: the others are refused from the
-        // header, so Develop says why, as for a tiled AVIF.
-        // RAWmakase's own decoder reads 4:2:0 and 4:4:4; the system's decide
-        // for themselves.
+        // RAWmakase's own decoder reads 4:2:0 and 4:4:4: the others are
+        // refused from the header, so Develop says why, as for a tiled AVIF.
+        // The system's decoders decide for themselves.
         let own = cfg!(all(
             feature = "software-hevc",
             not(any(target_os = "macos", windows))
@@ -206,6 +199,20 @@ impl HeicFile {
 
     pub(super) fn refusal(&self) -> Option<Unsupported> {
         self.refused.as_ref().map(|r| Unsupported(r.0.clone()))
+    }
+
+    /// Whether every picture's data is in the file, before any decoder reads
+    /// it: the header, not the decoder, says a file cut short is one, whose
+    /// pixels a system decoder might make up for.
+    fn stored(&mut self) -> Result<()> {
+        let mut checked = std::collections::HashSet::new();
+        for (id, _) in &self.layout.tiles {
+            ensure!(
+                !checked.insert(*id) || self.heif.stored_within(&mut self.file, *id),
+                "The HEIF image data is missing or cut off"
+            );
+        }
+        Ok(())
     }
 
     /// Whether a picture of `width` × `height` is this image: the whole
@@ -392,7 +399,7 @@ impl ImageDecoder for HeicFile {
     fn orientation(&mut self) -> image::ImageResult<Orientation> {
         Ok(self.orientation)
     }
-    fn read_image(self, buf: &mut [u8]) -> image::ImageResult<()> {
+    fn read_image(mut self, buf: &mut [u8]) -> image::ImageResult<()> {
         let failed = |e: anyhow::Error| {
             image::ImageError::Decoding(image::error::DecodingError::new(
                 image::error::ImageFormatHint::Name("HEIF".into()),
@@ -401,6 +408,7 @@ impl ImageDecoder for HeicFile {
         };
         let (crop, deep) = (self.crop, self.deep);
         let full = (self.layout.width, self.layout.height);
+        self.stored().map_err(failed)?;
         let Pixels { width, height, rgb } = pixels(self).map_err(failed)?;
         // The whole picture, cropped here, or the crop alone: any other size
         // is not the image the header describes (a system decoder that turned

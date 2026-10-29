@@ -3,7 +3,8 @@
 //!
 //! Both come from the Microsoft Store, as the HEIF Image Extensions and the
 //! HEVC Video Extensions, and a PC may lack either: then WIC can't decode the
-//! file, and the error says what to install.
+//! file. Which failure means that is not told apart here, so the error gives
+//! WIC's reason and says what to install if no HEIC photo opens.
 //!
 //! WIC's frame is converted to 8- or 16-bit RGB, the depth the header says,
 //! and read as it is: in the colour space of the file, which the profile the
@@ -46,9 +47,9 @@ pub(super) fn pixels(file: HeicFile) -> Result<Pixels> {
     let _com = Com::init();
     let missing = |e: windows::core::Error| {
         anyhow!(
-            "Windows could not decode the HEIF image ({}). Opening HEIC photos on Windows \
-             needs Microsoft's HEIF Image Extensions and HEVC Video Extensions, from the \
-             Microsoft Store.",
+            "Windows could not decode the HEIF image ({}). If no HEIC photo opens, install \
+             Microsoft's HEIF Image Extensions and HEVC Video Extensions from the Microsoft \
+             Store.",
             e.message()
         )
     };
