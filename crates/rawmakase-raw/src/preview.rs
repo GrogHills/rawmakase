@@ -44,9 +44,16 @@ pub(crate) fn smallest_reaching(
     };
     // Within 2%: mid-sized previews round their size to whole blocks.
     let shaped = |[w, h]: [u64; 2]| (w * height).abs_diff(h * width) * 50 <= w * height;
+    // Whole in the file: a preview cut short is no better than none.
+    let whole = |c: &&Candidate| {
+        c.len > 2
+            && c.offset
+                .checked_add(c.len)
+                .is_some_and(|end| end <= bytes.len() as u64)
+    };
     candidates
         .iter()
-        .filter(|c| c.len > 2)
+        .filter(whole)
         .filter_map(|c| Some(((c.offset, c.len), size((c.offset, c.len))?)))
         .filter(|&(_, [w, h])| w.max(h) >= u64::from(edge) && shaped([w, h]))
         .min_by_key(|&(_, [w, h])| w * h)
@@ -211,6 +218,13 @@ mod tests {
         assert_eq!(reaching(&[[640, 480], [6000, 4000]], 640), 1);
         // Turned upright already.
         assert_eq!(reaching(&[[1080, 1620], [6000, 4000]], 640), 1);
+        // Cut short by the end of the file.
+        let (bytes, candidates) = jpegs(&[[6000, 4000], [1620, 1080]]);
+        let cut = &bytes[..bytes.len() - 4];
+        assert_eq!(
+            super::smallest_reaching(&candidates, cut, 640),
+            Some((candidates[0].offset, candidates[0].len))
+        );
         // A largest whose size can't be read.
         let (mut bytes, candidates) = jpegs(&[[1620, 1080], [6000, 4000]]);
         bytes[candidates[1].offset as usize + 3] = 0xda;

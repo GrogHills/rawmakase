@@ -454,7 +454,9 @@ struct FilesRead<'a> {
 /// Threads that read files side by side.
 const READERS: usize = 4;
 /// `read` of each of `items`, in their order, on up to [`READERS`] threads
-/// side by side. A panic in one is the caller's, as it would be read in turn.
+/// side by side. A panic in one stops the others before their next item and
+/// is the caller's, as it would be read in turn; items no thread could be
+/// started for are read on the caller's.
 fn side_by_side<T: Send, R: Send>(items: Vec<T>, read: impl Fn(T) -> R + Sync) -> Vec<R> {
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
@@ -464,32 +466,53 @@ fn side_by_side<T: Send, R: Send>(items: Vec<T>, read: impl Fn(T) -> R + Sync) -
         return items.into_iter().map(read).collect();
     }
     let items = std::sync::Mutex::new(items.into_iter().enumerate());
+    let stopped = std::sync::atomic::AtomicBool::new(false);
     let next = || {
+        if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
         items
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .next()
     };
+    /// Stops the readers as one unwinds.
+    struct Stop<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
     let mut done: Vec<(usize, R)> = std::thread::scope(|scope| {
         let readers: Vec<_> = (0..threads)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut done = Vec::new();
-                    while let Some((index, item)) = next() {
-                        done.push((index, read(item)));
-                    }
-                    done
-                })
+            .filter_map(|_| {
+                std::thread::Builder::new()
+                    .spawn_scoped(scope, || {
+                        let _stop = Stop(&stopped);
+                        let mut done = Vec::new();
+                        while let Some((index, item)) = next() {
+                            done.push((index, read(item)));
+                        }
+                        done
+                    })
+                    .ok()
             })
             .collect();
-        readers
+        let mut done: Vec<_> = readers
             .into_iter()
             .flat_map(|reader| {
                 reader
                     .join()
                     .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
             })
-            .collect()
+            .collect();
+        // Left when no reader could be started.
+        while let Some((index, item)) = next() {
+            done.push((index, read(item)));
+        }
+        done
     });
     done.sort_unstable_by_key(|(index, _)| *index);
     done.into_iter().map(|(_, read)| read).collect()
@@ -853,5 +876,20 @@ mod tests {
         assert_eq!(read, (0..40).map(|n| n * 2).collect::<Vec<_>>());
         assert_eq!(most.load(Ordering::SeqCst), readers);
         assert!(super::side_by_side(Vec::<u32>::new(), |n| n).is_empty());
+    }
+
+    #[test]
+    fn a_panicking_read_stops_the_others() {
+        let reads = AtomicUsize::new(0);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::side_by_side((0..1000).collect(), |n: u32| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                assert_ne!(n, 3, "unreadable");
+                std::thread::sleep(Duration::from_millis(2));
+            })
+        }));
+        assert!(panicked.is_err());
+        // Each reader stops after the item it was reading.
+        assert!(reads.load(Ordering::SeqCst) < 100, "{reads:?}");
     }
 }
