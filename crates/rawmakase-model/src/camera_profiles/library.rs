@@ -534,6 +534,8 @@ fn import_into(
     for name in [
         super::open::STANDARD,
         super::open::COLOR,
+        super::fitted::LOOK,
+        super::fitted::MATRIX_BASE,
         "Adobe Standard",
         "Adobe Color",
     ] {
@@ -1242,6 +1244,7 @@ mod tests {
             write_cube(&cool_dir, "Adobe Vivid.cube", cool),
             write_cube(&cool_dir, "Camera Neutral.cube", cool),
             write_cube(&cool_dir, "RAWmakase Standard.cube", cool),
+            write_cube(&cool_dir, "Camera Look (fitted).cube", cool),
             // Not imported, but the name Lightroom edits fall back by.
             write_cube(&cool_dir, "Adobe Standard.cube", cool),
         ];
@@ -1254,6 +1257,7 @@ mod tests {
                 "Adobe Vivid (Cool)",
                 "Camera Neutral (Cool)",
                 "RAWmakase Standard (Cool)",
+                "Camera Look (fitted) (Cool)",
                 "Adobe Standard (Cool)"
             ]
         );

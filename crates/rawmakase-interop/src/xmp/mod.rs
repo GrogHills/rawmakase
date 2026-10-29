@@ -24,6 +24,9 @@ pub(crate) const LENSFUN_KEYS: [&str; 7] = [
     "rawmakase:LensfunName",
     "rawmakase:LensfunDatabase",
 ];
+/// A fitted camera look carried whole (`camera_profiles::fitted::carried`): no
+/// other application can rebuild it from its name.
+pub(crate) const FITTED_PROFILE_KEY: &str = "rawmakase:FittedProfile";
 /// A settings key as XMP writes it: Camera Raw's under `crs:`, RAWmakase's own as
 /// they are.
 pub(crate) fn qualified(key: &str) -> String {

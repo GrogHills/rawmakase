@@ -176,6 +176,49 @@ pub fn is_uncalibrated_base(p: &CameraProfile) -> bool {
     }
 }
 
+/// The carried form's version prefix, and the most a carried profile may expand
+/// to (a fitted one is about 250 KB of JSON).
+const CARRIED: &str = "v1:";
+const CARRIED_MAX: usize = 1 << 20;
+
+/// `p` as an XMP sidecar or preset carries it (`rawmakase:FittedProfile`): the
+/// whole profile, base included, so it renders the same wherever it is read,
+/// versioned, as zlib in Adobe's base 85 (the encoding of look tables).
+pub fn carried(p: &CameraProfile) -> String {
+    let json = serde_json::to_vec(p).unwrap_or_default();
+    format!("{CARRIED}{}", super::enhanced::compress(&json))
+}
+
+/// The fitted profile `text` carries, checked: of a known version, at most 1 MB,
+/// a valid fitted look whose UUID is its content's hash (so a profile altered on
+/// the way is refused), for the photo's camera.
+pub fn from_carried(text: &str, m: &Metadata) -> Result<CameraProfile> {
+    let body = text
+        .strip_prefix(CARRIED)
+        .ok_or_else(|| anyhow::anyhow!("Unknown fitted profile version"))?;
+    ensure!(body.len() <= CARRIED_MAX * 2, "Fitted profile too large");
+    let json = super::enhanced::expand(body)?;
+    ensure!(json.len() <= CARRIED_MAX, "Fitted profile too large");
+    let p: CameraProfile = serde_json::from_slice(&json)?;
+    p.validate()?;
+    let look = p
+        .enhanced
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("The fitted profile has no look"))?;
+    ensure!(p.name == LOOK, "Not a fitted camera look");
+    ensure!(
+        look.uuid.eq_ignore_ascii_case(&canonical_hash(&p)),
+        "The fitted profile does not match its UUID"
+    );
+    p.ensure_camera(m)?;
+    Ok(p)
+}
+
+/// Whether `p` is a fitted camera look (or a fitted base).
+pub fn is_fitted(p: &CameraProfile) -> bool {
+    p.name == LOOK || p.name == MATRIX_BASE
+}
+
 /// The MD5 of the profile's canonical serialization without its look UUID, as 32
 /// uppercase hex digits: every field that changes how it renders or where it
 /// applies (camera, matrices, tables, curves, amount bounds, monochrome).
@@ -242,6 +285,44 @@ mod tests {
             &FittedLook::identity(),
         );
         assert_ne!(d.unwrap().enhanced.unwrap().uuid, *uuid);
+    }
+
+    #[test]
+    fn a_carried_profile_comes_back_only_whole_and_for_its_camera() {
+        let m = camera();
+        let base = super::super::open::standard(&m).unwrap();
+        // An incompressible look: every node different.
+        let mut look = FittedLook::identity();
+        for (i, node) in look.table.iter_mut().enumerate() {
+            *node = [
+                ((i * 7919) % 61) as f32 - 30.,
+                1. + (i % 13) as f32 / 40.,
+                1.,
+            ];
+        }
+        let p = with_look(&base, &look).unwrap();
+        let text = carried(&p);
+        assert!(
+            text.starts_with("v1:") && text.len() < 400_000,
+            "{}",
+            text.len()
+        );
+        assert_eq!(from_carried(&text, &m).unwrap(), p);
+        // Another version, damage, a changed look, another camera: refused.
+        assert!(from_carried(&text.replacen("v1:", "v2:", 1), &m).is_err());
+        assert!(from_carried(&text[..text.len() / 2], &m).is_err());
+        let mut altered = p.clone();
+        altered.enhanced.as_mut().unwrap().monochrome = true;
+        assert!(
+            from_carried(&carried(&altered), &m).is_err(),
+            "UUID mismatch"
+        );
+        let other = Metadata {
+            model: "Other".into(),
+            ..m.clone()
+        };
+        assert!(from_carried(&text, &other).is_err());
+        assert!(is_fitted(&p) && !is_fitted(&base));
     }
 
     #[test]

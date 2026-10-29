@@ -332,6 +332,26 @@ impl Preset {
                     .flatten()
             })
     }
+    /// The fitted camera look these settings carry (`rawmakase:FittedProfile`), for
+    /// a look that names one: an error when it is missing, damaged, altered or for
+    /// another camera, which the settings then can't render as they were made.
+    fn fitted_profile(&self, m: &Metadata) -> Result<Option<CameraProfile>> {
+        let carried = self.settings.get(super::FITTED_PROFILE_KEY);
+        if self.look != crate::camera_profiles::fitted::LOOK && carried.is_none() {
+            return Ok(None);
+        }
+        let carried = carried.context("The fitted camera look's profile is missing")?;
+        let p = crate::camera_profiles::fitted::from_carried(carried, m)
+            .context("The fitted camera look can't be used")?;
+        if let Some(uuid) = self.settings.get("RAWmakaseLookUUID") {
+            let own = p.enhanced.as_ref().map(|e| e.uuid.as_str()).unwrap_or("");
+            ensure!(
+                own.eq_ignore_ascii_case(uuid),
+                "The fitted camera look does not match its UUID"
+            );
+        }
+        Ok(Some(p))
+    }
     /// Whether this preset's look, if it names one, can be rendered here.
     pub fn look_available(&self, m: &Metadata, profiles: &[Arc<CameraProfile>]) -> bool {
         self.look.is_empty() || self.resolve_look(m, profiles).is_some()
@@ -377,20 +397,27 @@ impl Preset {
             "Preset requires external RGB tables"
         );
         settings.seen.insert("CameraProfile".into());
-        if let Some(name) = self.requested_profile() {
-            r.profile = Some(
-                self.resolve_profile(name, m, profiles)
-                    .with_context(|| format!("Missing camera profile ‘{name}’ for {}", m.model))?,
-            );
-        }
+        settings.seen.insert(super::FITTED_PROFILE_KEY.into());
         settings.seen.insert("RAWmakaseLookUUID".into());
-        if !self.look.is_empty() {
-            r.profile = Some(self.resolve_look(m, profiles).with_context(|| {
-                format!(
-                    "Missing or unsupported enhanced profile ‘{}’ for {}",
-                    self.look, m.model
-                )
-            })?);
+        // A fitted camera look renders from the profile the settings carry, checked,
+        // never from a profile of its name: no other photo's fit is this one.
+        if let Some(fitted) = self.fitted_profile(m)? {
+            r.profile = Some(Arc::new(fitted));
+        } else {
+            if let Some(name) = self.requested_profile() {
+                r.profile =
+                    Some(self.resolve_profile(name, m, profiles).with_context(|| {
+                        format!("Missing camera profile ‘{name}’ for {}", m.model)
+                    })?);
+            }
+            if !self.look.is_empty() {
+                r.profile = Some(self.resolve_look(m, profiles).with_context(|| {
+                    format!(
+                        "Missing or unsupported enhanced profile ‘{}’ for {}",
+                        self.look, m.model
+                    )
+                })?);
+            }
         }
         // A new profile starts at 100%; a look that supports Amount takes the preset's.
         settings.seen.insert(super::look::SETTING.into());

@@ -206,7 +206,7 @@ pub(crate) fn group_of_key(key: &str) -> Option<SettingGroup> {
         "Dehaze" => Dehaze,
         "Vibrance" => Vibrance,
         "Saturation" => Saturation,
-        "CameraProfile" | "ConvertToGrayscale" => TreatmentAndProfile,
+        "CameraProfile" | "ConvertToGrayscale" | super::FITTED_PROFILE_KEY => TreatmentAndProfile,
         "ProcessVersion" => ProcessVersion,
         "Sharpness" | "EnableDetail" => Sharpening,
         "LuminanceSmoothing" => LuminanceNoiseReduction,

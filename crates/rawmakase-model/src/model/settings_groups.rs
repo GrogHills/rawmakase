@@ -504,12 +504,17 @@ pub fn transfer(
     {
         // A profile file belongs to one photo's camera (or its DNG): use the target's of
         // that name, else the source's when it fits this camera, else keep the target's.
+        // A fitted camera look is the source photo's own, never another fit of its name.
         let name = profile.name.as_str();
-        match target
-            .profiles
-            .iter()
-            .find(|p| p.name == name && p.ensure_camera(m).is_ok())
-        {
+        let same_name = (!crate::camera_profiles::fitted::is_fitted(profile))
+            .then(|| {
+                target
+                    .profiles
+                    .iter()
+                    .find(|p| p.name == name && p.ensure_camera(m).is_ok())
+            })
+            .flatten();
+        match same_name {
             Some(p) => recipe.profile = Some(p.clone()),
             None if profile.ensure_camera(m).is_ok() => {}
             None => {
