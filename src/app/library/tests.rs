@@ -5,7 +5,10 @@ use super::tree::{FolderNode, TreeAction, folder_tree_row};
 use super::*;
 use crate::catalog::{Folder, PhotoId};
 use eframe::egui::{Color32, Vec2};
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 #[test]
 fn develop_workspace_drains_library_preview_results() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -139,6 +142,44 @@ fn an_unsupported_jpeg_says_why_in_develop() -> Result<()> {
     let (title, reason) = editor.not_editable.clone().expect("the dialog");
     assert_eq!(title, "print.jpg can't be opened in Develop");
     assert_eq!(reason, "RAWmakase can't edit CMYK images");
+    Ok(())
+}
+
+/// A phone's HEIC is added with a folder and opens in Develop as a JPEG does;
+/// an HDR one is shown in the Library but Develop says why it can't edit it.
+#[test]
+fn a_heic_opens_in_develop_and_an_hdr_one_says_why_not() -> Result<()> {
+    let formats = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/formats");
+    let directory = tempfile::tempdir()?;
+    let folder = directory.path().join("photos");
+    std::fs::create_dir(&folder)?;
+    std::fs::copy(formats.join("grid.heic"), folder.join("IMG_0001.HEIC"))?;
+    std::fs::copy(formats.join("pq.heic"), folder.join("IMG_0002.HEIC"))?;
+    let path = directory.path().join("library.rawmakase");
+    Catalog::create(&path)?.add_folder(&folder)?;
+    let ctx = egui::Context::default();
+    let library = Library::load(&path, ctx.clone())?;
+    let photo = |name: &str| {
+        library
+            .session
+            .photos
+            .iter()
+            .find(|p| p.filename == name)
+            .cloned()
+            .unwrap()
+    };
+    let (heic, hdr) = (photo("IMG_0001.HEIC"), photo("IMG_0002.HEIC"));
+    assert_eq!(develop_refusal(&heic, true), None);
+    let refusal = develop_refusal(&hdr, true).expect("refused");
+    assert_eq!(refusal.label(), "HEIC file");
+    assert_eq!(refusal.detail(), "RAWmakase can't edit HDR images");
+    let mut editor = crate::app::Editor::with_context(&ctx, None, Default::default(), None);
+    editor.library = Some(Box::new(library));
+    editor.module = Module::Library;
+    editor.develop_catalog_photo(heic.id);
+    assert!(editor.module == Module::Develop);
+    assert!(editor.not_editable.is_none());
+    assert_eq!(editor.document.catalog_photo, Some(heic.id));
     Ok(())
 }
 
