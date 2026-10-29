@@ -53,9 +53,9 @@ pub(super) struct PreviewTextures {
     /// Photos whose edited preview was rendered ahead and kept in the cache,
     /// until they are shown or forgotten.
     pub(super) kept: HashSet<PhotoId>,
-    /// Where asking ahead got to: the position it starts from, and how far
-    /// past it the photos have been asked about.
-    ahead_scan: (usize, usize),
+    /// Where asking ahead got to: the list (by its version) and position it
+    /// starts from, and how far past it the photos have been asked about.
+    ahead_scan: ((u64, usize), usize),
     /// Previews showing each photo's edit, by photo.
     pub(super) edited: HashMap<PhotoId, egui::TextureHandle>,
     pub(super) edited_order: VecDeque<PhotoId>,
@@ -94,7 +94,7 @@ impl PreviewTextures {
             pace: Pace::Background,
             ahead: HashSet::new(),
             kept: HashSet::new(),
-            ahead_scan: (0, 0),
+            ahead_scan: ((0, 0), 0),
             edited: HashMap::new(),
             edited_order: VecDeque::new(),
             progress: Progress::default(),
@@ -294,13 +294,14 @@ impl PreviewTextures {
     /// At [`Pace::Full`], once the embedded previews asked for are in, asks
     /// for the edited previews of the `photos` at `order` not shown yet, a few
     /// at a time from position `start` on (and then from the first), up to
-    /// [`AHEAD_WINDOW`] of them, so they come from the cache once shown. `edit`
+    /// [`AHEAD_WINDOW`] of them, so they come from the cache once shown;
+    /// `version` changes with `order`, which starts it over. `edit`
     /// looks up each photo's edit when it is first asked about, as for a
     /// photo shown.
     pub(super) fn request_ahead(
         &mut self,
         photos: &[Photo],
-        order: &[usize],
+        (version, order): (u64, &[usize]),
         start: usize,
         mut edit: impl FnMut(PhotoId) -> Option<EditSource>,
     ) {
@@ -310,8 +311,8 @@ impl PreviewTextures {
         // A view not drawn yet, or past the end of a list grown shorter,
         // starts from the first.
         let start = if start < order.len() { start } else { 0 };
-        if self.ahead_scan.0 != start {
-            self.ahead_scan = (start, 0);
+        if self.ahead_scan.0 != (version, start) {
+            self.ahead_scan = ((version, start), 0);
         }
         let (mut scanned, mut looked_up) = (0, 0);
         while self.ahead.len() < AHEAD

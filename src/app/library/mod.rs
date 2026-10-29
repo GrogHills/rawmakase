@@ -1248,7 +1248,7 @@ impl Library {
         let catalog = &self.session.catalog;
         self.cache.request_ahead(
             &self.session.photos,
-            &self.visible,
+            (self.shown_version, &self.visible),
             self.grid_shown.end,
             |id| edit_source(catalog, id),
         );

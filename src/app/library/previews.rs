@@ -500,6 +500,10 @@ impl Renders {
         let shared = &self.results.shared;
         let no_cache = cache(&self.cache).is_none();
         let mut state = shared.lock();
+        // Closed since it was looked up: nothing is rendered, nor answered.
+        if state.closed {
+            return;
+        }
         let EditJob::Render {
             id,
             ticket,
@@ -1203,6 +1207,14 @@ pub(super) mod tests {
             rx.try_recv(),
             Ok(EditResult::Skipped(PhotoId(2), 2))
         ));
+        assert!(shared.lock().running.is_empty());
+        // Closed since it was looked up.
+        let shared = Arc::<Shared>::default();
+        shared.lock().jobs.push(queued(render_job(3, &path, false)));
+        let (renders, rx) = counting(&shared, None, Wanted::default());
+        shared.close();
+        renders.start(0);
+        assert!(rx.try_recv().is_err());
         assert!(shared.lock().running.is_empty());
         assert_eq!(RENDERED.load(Ordering::SeqCst), 0);
         Ok(())

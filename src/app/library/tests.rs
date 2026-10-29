@@ -4037,29 +4037,29 @@ fn edited_previews_are_asked_ahead_only_at_full_pace_in_order_from_the_view() ->
             .collect::<Vec<_>>()
     };
     // Develop in front: nothing ahead.
-    library.cache.request_ahead(&photos, &order, 2, edit);
+    library.cache.request_ahead(&photos, (0, &order), 2, edit);
     assert!(asked(&jobs).is_empty());
     library.cache.set_pace(Pace::Full);
     // Not while embedded previews asked for are still coming.
     library.cache.pending.insert(photos[0].path.clone());
-    library.cache.request_ahead(&photos, &order, 2, edit);
+    library.cache.request_ahead(&photos, (0, &order), 2, edit);
     assert!(asked(&jobs).is_empty());
     library.cache.pending.clear();
     // Before the grid is drawn its range ends at usize::MAX: from the first.
     library
         .cache
-        .request_ahead(&photos, &order, usize::MAX, |_| None);
+        .request_ahead(&photos, (0, &order), usize::MAX, |_| None);
     assert!(asked(&jobs).is_empty());
     assert_eq!(library.cache.edited_requested.len(), photos.len());
     library.cache.edited_requested.clear();
     // Photo b is shown, so asked already; the rest from after the view on.
     library.cache.edited_requested.insert(photos[1].id, 99);
-    library.cache.request_ahead(&photos, &order, 2, edit);
+    library.cache.request_ahead(&photos, (0, &order), 2, edit);
     assert_eq!(asked(&jobs), [photos[2].id, photos[3].id, photos[0].id]);
     assert_eq!(library.cache.ahead.len(), 3);
     assert_eq!(library.cache.edits_pending, 0);
     // Asked once.
-    library.cache.request_ahead(&photos, &order, 2, edit);
+    library.cache.request_ahead(&photos, (0, &order), 2, edit);
     assert!(asked(&jobs).is_empty());
     // Kept: asked again only when shown, from the cache.
     let ticket = library.cache.edited_requested[&photos[2].id];
@@ -4069,14 +4069,20 @@ fn edited_previews_are_asked_ahead_only_at_full_pace_in_order_from_the_view() ->
     assert!(!library.cache.edited_requested.contains_key(&photos[2].id));
     assert_eq!(library.cache.ahead.len(), 2);
     assert!(!library.has_edited_thumbnail(photos[2].id));
-    library.cache.request_ahead(&photos, &order, 2, edit);
+    library.cache.request_ahead(&photos, (0, &order), 2, edit);
     assert!(asked(&jobs).is_empty());
     // Given up for Develop: asked ahead again once back at full pace.
     let ticket = library.cache.edited_requested[&photos[3].id];
     result_tx.send(previews::EditResult::Skipped(photos[3].id, ticket))?;
     library.poll_previews(&ctx);
-    library.cache.request_ahead(&photos, &order, 2, edit);
+    library.cache.request_ahead(&photos, (0, &order), 2, edit);
     assert_eq!(asked(&jobs), [photos[3].id]);
+    // Another list from the same position, as another folder at its top:
+    // asked over again, the first photo after the view first.
+    let other = [3, 2, 1, 0];
+    library.cache.edited_requested.remove(&photos[1].id);
+    library.cache.request_ahead(&photos, (1, &other), 2, edit);
+    assert_eq!(asked(&jobs), [photos[1].id]);
     // Shown by the time it is done: shown.
     let ticket = library.cache.edited_requested[&photos[0].id];
     result_tx.send(previews::EditResult::Ready(
