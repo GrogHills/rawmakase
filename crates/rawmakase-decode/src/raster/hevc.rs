@@ -1,9 +1,9 @@
 //! A HEIF item's HEVC configuration (`hvcC`), which every platform reads from
 //! the header, and where RAWmakase decodes HEVC itself, the decoder
 //! (`decoder`).
-#[cfg(feature = "software-hevc")]
+#[cfg(all(feature = "software-hevc", not(target_os = "macos")))]
 mod decoder;
-#[cfg(feature = "software-hevc")]
+#[cfg(all(feature = "software-hevc", not(target_os = "macos")))]
 pub(super) use decoder::{Picture, Planes, decode};
 
 /// The largest `hvcC` read: its parameter sets take a few hundred bytes, and
@@ -21,14 +21,20 @@ pub(super) struct Config {
     /// Bytes before each NAL unit giving its length: 1, 2 or 4.
     // This and the parameter sets are for RAWmakase's own decoder; a
     // platform's decodes the file.
-    #[cfg_attr(not(feature = "software-hevc"), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "software-hevc", not(target_os = "macos"))),
+        allow(dead_code)
+    )]
     length_size: u8,
     /// Bits per luma sample.
     pub(super) depth: u8,
     /// `chroma_format_idc`: 0 monochrome, 1 4:2:0, 2 4:2:2, 3 4:4:4.
     pub(super) chroma: u8,
     /// The VPS, SPS, PPS and SEI NAL units, in order.
-    #[cfg_attr(not(feature = "software-hevc"), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "software-hevc", not(target_os = "macos"))),
+        allow(dead_code)
+    )]
     parameter_sets: Vec<Vec<u8>>,
 }
 

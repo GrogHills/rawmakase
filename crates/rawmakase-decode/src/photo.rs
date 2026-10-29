@@ -426,7 +426,7 @@ mod tests {
         for name in [
             "metadata.webp",
             "ten-bit.avif",
-            #[cfg(feature = "software-hevc")]
+            #[cfg(any(target_os = "macos", feature = "software-hevc"))]
             "grid.heic",
             "metadata.jxl",
         ] {

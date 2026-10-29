@@ -1,10 +1,13 @@
 //! A HEIC (a HEIF of HEVC) still: our reading of its container
-//! ([`rawmakase_interop::isobmff`]) here, its pixels decoded by RAWmakase's own
-//! decoder (`software`).
+//! ([`rawmakase_interop::isobmff`]) here, its pixels decoded by the system's
+//! HEVC decoder where it has one for RAWmakase to use (macOS's ImageIO,
+//! `imageio`), and otherwise by RAWmakase's own (`software`). Either way the
+//! header here says the size, crop, colour and orientation, and what Develop
+//! refuses.
 //!
-//! A build without the decoder (without the `software-hevc` feature, for
-//! packagers who leave software HEVC decoders out) reads the header, so the
-//! photo is listed with its size and metadata, but refuses its pixels.
+//! A build without a decoder (on Linux without the `software-hevc` feature,
+//! for packagers who leave software HEVC decoders out) reads the header, so
+//! the photo is listed with its size and metadata, but refuses its pixels.
 //!
 //! A phone's photo is a grid (`grid`) of tiles, 512×512 on an iPhone, each its
 //! own HEVC picture. A clean aperture (`clap`) crops the picture, before its
@@ -26,19 +29,25 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-#[cfg(feature = "software-hevc")]
+#[cfg(target_os = "macos")]
+mod imageio;
+#[cfg(target_os = "macos")]
+use imageio::pixels;
+#[cfg(all(feature = "software-hevc", not(target_os = "macos")))]
 mod software;
-#[cfg(feature = "software-hevc")]
+#[cfg(all(feature = "software-hevc", not(target_os = "macos")))]
 use software::pixels;
 
 /// No decoder in this build.
-#[cfg(not(feature = "software-hevc"))]
+#[cfg(not(any(feature = "software-hevc", target_os = "macos")))]
 fn pixels(_: HeicFile) -> Result<Pixels> {
     bail!("This build of RAWmakase has no HEVC decoder, so it can't show HEIF images")
 }
 
 /// Decoded pixels: `width` × `height` of interleaved RGB, 8-bit samples or
-/// 16-bit ones (native endian), as [`HeicFile`]'s colour type says.
+/// 16-bit ones (native endian), as [`HeicFile`]'s colour type says, in the
+/// colour space its profile says: the whole picture, or (a system decoder
+/// that crops by the `clap` itself) the clean aperture alone.
 struct Pixels {
     width: u32,
     height: u32,
@@ -72,7 +81,10 @@ struct Layout {
     /// configuration, one for each item a grid lists however often.
     tiles: Vec<(u32, Arc<hevc::Config>)>,
     // RAWmakase's own decoder lays out the tiles; a platform's the file.
-    #[cfg_attr(not(feature = "software-hevc"), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "software-hevc", not(target_os = "macos"))),
+        allow(dead_code)
+    )]
     columns: u32,
     /// Each picture's size.
     tile: (u32, u32),
@@ -82,10 +94,19 @@ pub(super) struct HeicFile {
     crop: Crop,
     /// More than 8 bits per sample, from `hvcC`.
     deep: bool,
+    /// Where the file is, for a system decoder to open.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    path: std::path::PathBuf,
     /// The file and its boxes, to read the pictures from when decoding.
-    #[cfg_attr(not(feature = "software-hevc"), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "software-hevc", not(target_os = "macos"))),
+        allow(dead_code)
+    )]
     file: std::fs::File,
-    #[cfg_attr(not(feature = "software-hevc"), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "software-hevc", not(target_os = "macos"))),
+        allow(dead_code)
+    )]
     heif: Heif,
     layout: Layout,
     icc: Option<Vec<u8>>,
@@ -141,11 +162,14 @@ impl HeicFile {
         let animated = [b"msf1", b"hevc", b"hevx", b"hevm", b"hevs"];
         // rust_h265 decodes 4:2:0 and 4:4:4: the others are refused from the
         // header, so Develop says why, as for a tiled AVIF.
-        let refused = if cfg!(not(feature = "software-hevc")) {
+        // RAWmakase's own decoder reads 4:2:0 and 4:4:4; the system's decide
+        // for themselves.
+        let own = cfg!(all(feature = "software-hevc", not(target_os = "macos")));
+        let refused = if cfg!(not(any(feature = "software-hevc", target_os = "macos"))) {
             Some(Unsupported("HEIF".into()))
-        } else if chroma == 0 {
+        } else if own && chroma == 0 {
             Some(Unsupported("monochrome HEIF".into()))
-        } else if chroma == 2 {
+        } else if own && chroma == 2 {
             Some(Unsupported("4:2:2 HEIF".into()))
         } else if nclx.is_some_and(Nclx::hdr) {
             Some(Unsupported("HDR".into()))
@@ -157,6 +181,7 @@ impl HeicFile {
         Ok(Self {
             crop,
             deep: depth > 8,
+            path: path.to_path_buf(),
             file,
             orientation: avif::transforms(&props),
             heif,
@@ -356,17 +381,24 @@ impl ImageDecoder for HeicFile {
         let (crop, deep) = (self.crop, self.deep);
         let full = (self.layout.width, self.layout.height);
         let Pixels { width, height, rgb } = pixels(self).map_err(failed)?;
-        if (width, height) != full {
+        // The whole picture, cropped here, or the crop alone: any other size
+        // is not the image the header describes (a system decoder that turned
+        // it, say), and is not shown.
+        let (left, top) = if (width, height) == full {
+            (crop.left, crop.top)
+        } else if (width, height) == (crop.width, crop.height) {
+            (0, 0)
+        } else {
             return Err(failed(anyhow!("The HEIF image is not the size it says")));
-        }
+        };
         // Bytes per pixel: three samples of one or two bytes.
         let pixel = if deep { 6 } else { 3 };
         let (row, kept) = (width as usize * pixel, crop.width as usize * pixel);
-        if kept * crop.height as usize != buf.len() {
+        if kept * crop.height as usize != buf.len() || rgb.len() != row * height as usize {
             return Err(failed(anyhow!("The HEIF image is not the size it says")));
         }
         for (y, out) in buf.chunks_exact_mut(kept).enumerate() {
-            let start = (crop.top as usize + y) * row + crop.left as usize * pixel;
+            let start = (top as usize + y) * row + left as usize * pixel;
             out.copy_from_slice(&rgb[start..start + kept]);
         }
         Ok(())
