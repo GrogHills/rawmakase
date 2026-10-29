@@ -10,7 +10,9 @@
 //! space of that name, the one it knows the transfer of. A profile is used
 //! only when moxcms, which reads it for the rest of RAWmakase, finds it an RGB
 //! one, and CoreGraphics reads it as RGB too; otherwise the pixels are drawn
-//! as sRGB, as RAWmakase takes such a profile. An image with alpha comes out
+//! as sRGB. That is how RAWmakase takes a profile moxcms can't read; one only
+//! CoreGraphics can't read (none is known) would leave the colours off, as
+//! RAWmakase still converts from it. An image with alpha comes out
 //! composited over black, as CoreGraphics premultiplies it (RAWmakase's own
 //! decoder ignores alpha and keeps the stored colour); photos rarely have
 //! any.
