@@ -39,10 +39,14 @@ pub(super) fn available_paths(photos: &[Photo]) -> HashSet<PathBuf> {
         .collect()
 }
 
+/// The Library's thumbnail of `path`, within 640 pixels. A RAW's comes from
+/// its file's facts alone (no lens tables or profiles, which `photo::open`
+/// adds for developing) and from the smallest embedded preview that reaches
+/// that size.
 pub(super) fn thumbnail(path: &std::path::Path) -> Result<image::RgbImage> {
     let image = if crate::storage::is_raw(path) {
-        let mut raw = crate::photo::open(path)?;
-        crate::raw::thumbnail(&mut raw)?
+        let mut raw = crate::raw::Raw::open_file(path)?;
+        crate::raw::thumbnail_reaching(&mut raw, 640)?
     } else {
         crate::raster::decode(path)?
     };

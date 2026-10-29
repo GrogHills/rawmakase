@@ -76,8 +76,21 @@ impl Editor {
             || self.exporting()
             || self.load.is_running()
             || self.preview_builds.progress().is_some_and(|p| p.running());
+        // Edited previews take more than two cores only while the Library is
+        // in front and nothing else renders, so Develop, exports and preview
+        // builds keep the computer.
+        let pace = if self.module == Module::Library
+            && !self.exporting()
+            && !self.load.is_running()
+            && !self.preview_builds.progress().is_some_and(|p| p.running())
+        {
+            crate::app::library::Pace::Full
+        } else {
+            crate::app::library::Pace::Background
+        };
         if let Some(library) = &mut self.library {
             library.session.pause_checksums(busy);
+            library.set_preview_pace(pace);
             library.publish_shown();
             library.poll_previews(&ctx);
         }

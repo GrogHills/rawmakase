@@ -29,7 +29,10 @@ pub fn developed() -> String {
 /// scheduling priority, and parallel work (RAWmakase's decoders) on two
 /// background threads, never the shared pool.
 /// Every worker that reads or decodes photos behind the user's back starts
-/// here or in [`background_pool`], so none competes with Develop for the CPU.
+/// here or in [`background_pool`], so none competes with Develop for the CPU;
+/// one that takes a wider pool of its own does so only while Develop is not
+/// in front (the Library's edited previews), or for file reads that leave
+/// most cores idle (its thumbnails).
 pub fn spawn_background(work: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         // `work` runs on the pool's threads, which lower their own priority
@@ -365,6 +368,12 @@ impl Raw {
     pub fn thumbnail(&mut self) -> Result<Vec<u8>> {
         self.own.thumbnail()
     }
+    /// The embedded preview a thumbnail `edge` pixels on its long side is
+    /// best made from, as stored: the smallest that reaches `edge` and has
+    /// the largest one's shape, else the largest.
+    pub fn thumbnail_reaching(&mut self, edge: u32) -> Result<Vec<u8>> {
+        self.own.thumbnail_reaching(edge)
+    }
     /// The unpacked sensor data as development reads it, without developing.
     pub(crate) fn sensor(&self) -> Result<Sensor> {
         self.own.sensor()
@@ -613,6 +622,14 @@ fn sony_frame(
 /// RAW's.
 pub fn thumbnail(raw: &mut Raw) -> anyhow::Result<image::RgbImage> {
     let bytes = raw.thumbnail()?;
+    preview_image(bytes, raw.metadata.flip)
+}
+/// The embedded preview for a thumbnail `edge` pixels on its long side,
+/// upright as [`thumbnail`]'s: from the smallest preview that reaches `edge`
+/// (see [`Raw::thumbnail_reaching`]), so a full-size JPEG is decoded only
+/// when nothing smaller will do.
+pub fn thumbnail_reaching(raw: &mut Raw, edge: u32) -> anyhow::Result<image::RgbImage> {
+    let bytes = raw.thumbnail_reaching(edge)?;
     preview_image(bytes, raw.metadata.flip)
 }
 /// The most pixels a JPEG XL preview may claim: a 100-megapixel camera's.
