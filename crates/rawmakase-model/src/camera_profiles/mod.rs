@@ -789,6 +789,7 @@ mod cube;
 mod cube_look;
 mod dcp;
 mod enhanced;
+pub mod fitted;
 mod library;
 mod look_settings;
 pub mod open;
