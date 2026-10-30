@@ -23,6 +23,8 @@ use crate::preview::Candidate;
 /// What the maker note says that reading the file needs.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Notes {
+    /// The Picture Control the camera's JPEGs were made with.
+    pub picture_control: Option<String>,
     /// As-shot multipliers: red, green, blue, second green.
     pub cam_mul: Option<[f32; 4]>,
     pub presets: Presets,
@@ -77,6 +79,30 @@ pub(crate) struct Curve {
     pub split: u16,
 }
 
+/// PictureControlData's name: 20 characters after the version, which is written twice
+/// from version 0310 on. Upper case in the file, as the camera's menu doesn't show it.
+fn picture_control(data: &[u8]) -> Option<String> {
+    let at = if data.get(4..8) == data.get(..4) {
+        8
+    } else {
+        4
+    };
+    let name = data.get(at..at + 20)?;
+    let text = String::from_utf8_lossy(name.split(|b| *b == 0).next()?);
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map_or(String::new(), |f| {
+                f.to_uppercase()
+                    .chain(c.flat_map(char::to_lowercase))
+                    .collect()
+            })
+        })
+        .collect();
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
 /// The maker note of `t`'s EXIF directory, read.
 pub(crate) fn read(t: &TiffFile, model: &str) -> Notes {
     match maker_note(t) {
@@ -128,6 +154,9 @@ fn read_note(note: &TiffFile, headerless: bool, model: &str) -> Notes {
     {
         notes.cam_mul = Some([levels[0] as f32, 1., levels[1] as f32, 1.]);
     }
+    notes.picture_control = note
+        .raw_upto(ifd, 0x0023, 28)
+        .and_then(|data| picture_control(&data));
     let keys = Keys::of(note, ifd, model);
     // The balance and its black are in the first 80 bytes (version 0100's
     // levels end there); the cipher's stream does not depend on the length.
@@ -466,6 +495,20 @@ const COUNT_KEYS: [u8; 256] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_control_is_read_from_either_layout() {
+        let name = |version: &[u8], text: &[u8]| {
+            let mut d = version.to_vec();
+            d.extend(text);
+            d.resize(version.len() + 20, 0);
+            picture_control(&d)
+        };
+        assert_eq!(name(b"03100310", b"NEUTRAL").as_deref(), Some("Neutral"));
+        assert_eq!(name(b"0100", b"MONOCHROME").as_deref(), Some("Monochrome"));
+        assert_eq!(name(b"0100", b"FLAT LOOK").as_deref(), Some("Flat Look"));
+        assert_eq!(name(b"0100", b""), None);
+    }
 
     /// Adobe's MakN record of a Nikon note (its own TIFF, ISO 200 in
     /// 0x0002) is read; other records, and the record cut anywhere, are

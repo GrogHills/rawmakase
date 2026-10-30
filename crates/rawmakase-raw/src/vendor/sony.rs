@@ -187,6 +187,8 @@ const FULL_IMAGE_SIZE: u16 = 0xb02b;
 /// Reads the facts Sony keeps in its private directories into `info`: white
 /// balance and presets, the default crop; returns the levels.
 pub(crate) fn read(t: &TiffFile, raw: &Ifd, info: &mut RawInfo) -> Levels {
+    // A style's name is short whatever length the file gives the record.
+    info.camera_look = maker_note(t).and_then(|mn| creative_style(&t.raw_upto(&mn, 0xb020, 64)?));
     let sr2 = Sr2::read(t);
     // One value more than any record read, so that a longer one still
     // fails its length check.
@@ -354,6 +356,22 @@ impl Mrw {
     }
 }
 
+/// CreativeStyle (0xB020), by the name the camera gives it, its short names in full.
+fn creative_style(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes.split(|b| *b == 0).next()?);
+    let name = match text.trim() {
+        "" | "None" | "n/a" => return None,
+        "ST" => "Standard",
+        "PT" => "Portrait",
+        "NT" => "Neutral",
+        "VV" => "Vivid",
+        "VV2" => "Vivid 2",
+        "BW" => "B&W",
+        other => other,
+    };
+    Some(name.to_owned())
+}
+
 /// The maker note's directory: Sony's notes start with "SONY DSC " or "SONY
 /// CAM " and three zero bytes before it; its offsets are from the TIFF
 /// header.
@@ -373,6 +391,13 @@ fn maker_note(t: &TiffFile) -> Option<Ifd> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_creative_style_is_named_in_full() {
+        assert_eq!(creative_style(b"Portrait\0\0").as_deref(), Some("Portrait"));
+        assert_eq!(creative_style(b"PT\0").as_deref(), Some("Portrait"));
+        assert_eq!(creative_style(b"\0\0"), None);
+    }
 
     #[test]
     fn older_black_levels_are_by_filter_position() {

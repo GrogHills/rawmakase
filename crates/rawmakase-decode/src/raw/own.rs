@@ -317,6 +317,7 @@ fn header(i: &RawInfo) -> Header {
         matrix: i.rgb_cam,
         cam_xyz: i.cam_xyz,
         matrix_source: matrix_source(i.matrix_source),
+        camera_look: i.camera_look.clone(),
         lens: i.lens.clone(),
         lens_id: i.lens_id,
         dng_version: i.dng_version,

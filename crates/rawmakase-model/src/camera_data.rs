@@ -186,6 +186,10 @@ pub struct Metadata {
     /// Where `cam_xyz` comes from; read again on open, not saved.
     #[serde(skip)]
     pub matrix_source: MatrixSource,
+    /// The look the camera's JPEGs were made with, by the maker's name for it; read
+    /// again on open, not saved.
+    #[serde(skip)]
+    pub camera_look: Option<String>,
     /// What the DNG's embedded camera profile is to this photo; read again on open,
     /// not saved.
     #[serde(skip)]

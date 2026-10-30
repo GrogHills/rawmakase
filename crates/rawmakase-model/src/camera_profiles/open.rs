@@ -124,6 +124,7 @@ pub fn color(m: &Metadata) -> Option<CameraProfile> {
     let mut p = base.clone();
     p.name = COLOR.into();
     p.enhanced = Some(Enhanced {
+        camera_look: None,
         uuid: COLOR_UUID.into(),
         base_name: base.name,
         highlights: 0.,

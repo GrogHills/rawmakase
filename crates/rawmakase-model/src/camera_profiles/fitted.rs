@@ -38,6 +38,8 @@ pub struct FittedLook {
     pub table: Vec<[f32; 3]>,
     pub curve: Vec<f32>,
     pub monochrome: bool,
+    /// The look of the camera JPEG it was fitted to, by the maker's name for it.
+    pub camera_look: Option<String>,
 }
 impl FittedLook {
     /// The look that changes nothing.
@@ -46,12 +48,15 @@ impl FittedLook {
             table: vec![[0., 1., 1.]; TABLE_DIMS.iter().product()],
             curve: (0..4097).map(|i| i as f32 / 4096.).collect(),
             monochrome: false,
+            camera_look: None,
         }
     }
 }
 
 /// The fitted look over `base` (RAWmakase Standard, or [`matrix_base`]): a complete
-/// profile, validated, with its look UUID the canonical hash.
+/// profile, validated, with its look UUID the canonical hash. A camera look name no
+/// carried profile could hold is left out: it comes from the file, and the look doesn't
+/// depend on it.
 pub fn with_look(base: &CameraProfile, look: &FittedLook) -> Result<CameraProfile> {
     ensure!(
         base.enhanced.is_none(),
@@ -65,6 +70,10 @@ pub fn with_look(base: &CameraProfile, look: &FittedLook) -> Result<CameraProfil
     p.name = LOOK.into();
     p.copyright = COPYRIGHT.into();
     p.enhanced = Some(Enhanced {
+        camera_look: look
+            .camera_look
+            .clone()
+            .filter(|l| l.chars().count() <= CAMERA_LOOK_MAX),
         uuid: String::new(),
         base_name: base.name.clone(),
         highlights: 0.,
@@ -267,11 +276,27 @@ pub fn from_carried(text: &str, m: &Metadata) -> Result<CameraProfile> {
         .ok_or_else(|| anyhow::anyhow!("The fitted profile has no look"))?;
     ensure!(p.name == LOOK, "Not a fitted camera look");
     ensure!(
+        look.camera_look
+            .as_ref()
+            .is_none_or(|l| l.chars().count() <= CAMERA_LOOK_MAX),
+        "Invalid fitted profile"
+    );
+    ensure!(
         look.uuid.eq_ignore_ascii_case(&canonical_hash(&p)),
         "The fitted profile does not match its UUID"
     );
     p.ensure_camera(m)?;
     Ok(p)
+}
+
+/// The most characters of a carried profile's camera look name.
+const CAMERA_LOOK_MAX: usize = 64;
+
+/// A fitted look's title in the Profile menu: with the camera's look it was fitted
+/// to, when the file names one. Others have none.
+pub fn title(p: &CameraProfile) -> Option<String> {
+    let look = p.enhanced.as_ref()?.camera_look.as_ref()?;
+    (p.name == LOOK).then(|| format!("{LOOK}: {look}"))
 }
 
 /// Whether `p` is a fitted camera look (or a fitted base).
@@ -297,6 +322,48 @@ pub fn canonical_hash(p: &CameraProfile) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_camera_look_name_too_long_to_carry_is_left_out_of_the_profile() {
+        let m = camera();
+        let base = standard_base(&m).expect("a matrix");
+        let long = with_look(
+            &base,
+            &FittedLook {
+                camera_look: Some("x".repeat(CAMERA_LOOK_MAX + 1)),
+                ..FittedLook::identity()
+            },
+        )
+        .unwrap();
+        assert_eq!(title(&long), None);
+        assert_eq!(long.enhanced.as_ref().unwrap().camera_look, None);
+    }
+
+    #[test]
+    fn the_camera_s_look_is_in_the_title_and_travels_with_the_profile() {
+        let m = camera();
+        let base = standard_base(&m).expect("a matrix");
+        let plain = with_look(&base, &FittedLook::identity()).unwrap();
+        assert_eq!(title(&plain), None);
+        let named = with_look(
+            &base,
+            &FittedLook {
+                camera_look: Some("Classic Chrome".into()),
+                ..FittedLook::identity()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            title(&named).as_deref(),
+            Some("Camera Look (fitted): Classic Chrome")
+        );
+        assert_ne!(
+            plain.enhanced.unwrap().uuid,
+            named.enhanced.as_ref().unwrap().uuid
+        );
+        let back = from_carried(&carried(&named), &m).unwrap();
+        assert_eq!(title(&back), title(&named));
+    }
 
     fn camera() -> Metadata {
         Metadata {

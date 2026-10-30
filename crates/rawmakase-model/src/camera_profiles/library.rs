@@ -207,7 +207,10 @@ impl Groups {
             .titles
             .iter()
             .find(|(p, _)| p.name == profile.name && p.camera == profile.camera && **p == *profile)
-            .map_or_else(|| profile.name.clone(), |(_, title)| title.clone());
+            .map_or_else(
+                || super::fitted::title(profile).unwrap_or_else(|| profile.name.clone()),
+                |(_, title)| title.clone(),
+            );
         MenuEntry {
             group,
             section: None,

@@ -478,6 +478,8 @@ pub(crate) fn open(bytes: &[u8]) -> Result<RawInfo> {
         {
             info.aspect = [x, y, w, h];
         }
+
+        info.camera_look = crate::vendor::canon::picture_style(&t, notes);
         info.highlight_tone_priority = notes::highlight_tone_priority(&t, notes);
         info.sensor_crop = notes::sensor_crop(&t, notes);
     }

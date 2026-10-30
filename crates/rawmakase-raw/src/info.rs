@@ -120,6 +120,10 @@ pub struct RawInfo {
     pub matrix_source: MatrixSource,
     /// The colour space of the camera's JPEGs, when the maker notes say it.
     pub preview_space: Option<PreviewSpace>,
+    /// The look the camera's JPEGs were made with, by the maker's name for it: a
+    /// Fujifilm film simulation, Sony Creative Style, Nikon Picture Control or Canon
+    /// Picture Style.
+    pub camera_look: Option<String>,
     /// Camera to sRGB primaries (rows sum to one).
     pub rgb_cam: [[f32; 3]; 3],
     pub lens: String,
@@ -251,6 +255,7 @@ pub(crate) fn base(variant: Variant) -> RawInfo {
         cam_xyz: [[0.; 3]; 3],
         matrix_source: MatrixSource::Absent,
         preview_space: None,
+        camera_look: None,
         rgb_cam: [[0.; 3]; 3],
         lens: String::new(),
         lens_id: 0,

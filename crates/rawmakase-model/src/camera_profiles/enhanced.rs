@@ -76,6 +76,10 @@ const ALPHABET: &[u8] =
 pub struct Enhanced {
     pub uuid: String,
     pub base_name: String,
+    /// Of a fitted look: the look of the camera JPEG it was fitted to, by the maker's
+    /// name for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_look: Option<String>,
     #[serde(default)]
     pub highlights: f32,
     #[serde(default)]
@@ -110,6 +114,7 @@ impl Enhanced {
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn for_test(table: Table) -> Self {
         Self {
+            camera_look: None,
             uuid: "0".repeat(32),
             base_name: "Test".into(),
             highlights: 0.,
@@ -598,6 +603,7 @@ impl LookFile {
         }
         let lut = CurveLut::new(&curve);
         let look = Enhanced {
+            camera_look: None,
             uuid: attr("UUID").into(),
             base_name: String::new(),
             highlights: adjustment("Highlights2012")?,

@@ -40,7 +40,7 @@ type Rgb = [f32; 3];
 
 /// The fit's version: part of a fit cache's key, raised whenever what a fit makes
 /// of a photo changes.
-pub const FIT_VERSION: u32 = 3;
+pub const FIT_VERSION: u32 = 4;
 /// The proxy's long edge, and how much larger its renders are.
 const PROXY_EDGE: u32 = 192;
 const RENDER_FACTOR: u32 = 4;
@@ -427,11 +427,12 @@ fn fit_pairs(
     // and rendered.
     for &kind in kinds {
         stopped(cancel)?;
-        let look = match kind {
+        let mut look = match kind {
             Kind::Colour => solve::colour_look(&base, &fit_scene, &fit_target),
             Kind::ToneOnly => solve::tone_look(&base, &fit_scene, &fit_target),
             Kind::Monochrome => solve::monochrome_look(&fit_scene, &fit_target),
         };
+        look.camera_look = m.camera_look.clone();
         let profile = fitted::with_look(&base, &look).map_err(|e| refuse(format!("{e:#}")))?;
         let render = full_render(
             &small,
