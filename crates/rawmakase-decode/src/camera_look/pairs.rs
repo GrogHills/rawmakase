@@ -4,6 +4,7 @@
 use super::{PROXY_EDGE, RENDER_FACTOR, Refusal, Rgb, refuse};
 use crate::raster::PreviewSpace;
 use rawmakase_interop::exif::ColourFacts;
+use rayon::prelude::*;
 use serde::Serialize;
 use std::sync::atomic::AtomicBool;
 
@@ -365,15 +366,18 @@ fn correlation(a: &[f32], b: &[f32], width: u32, [x0, y0, x1, y1]: [u32; 4]) -> 
     (cov / (va * vb).sqrt()) as f32
 }
 
-/// The least correlation the centre must reach, and each quadrant: a quadrant of sky
+/// The least correlation for a photo to line up: strictly, the centre and every
+/// quadrant at `MIN_CORRELATION`, which also ends the search; else the centre at
+/// `MIN_CENTRE` and each quadrant at `MIN_QUADRANT`: a quadrant of sky
 /// or blurred background has little detail to correlate, and a few pixels off in it
 /// matter little to a colour fit, which the held-out tiles judge anyway. A fit that
 /// also fits the matrix (`strict`) could bend it to wrong pairs: its quadrants must
 /// reach the centre's.
 const MIN_CORRELATION: f32 = 0.85;
+const MIN_CENTRE: f32 = 0.8;
 const MIN_QUADRANT: f32 = 0.45;
 
-/// The preview aligned with the proxy (scales 0.97–1.03, radial distortion, shifts of
+/// The preview aligned with the proxy (scales 0.97–1.03, then 0.88–1.12 with radial distortion, shifts of
 /// up to 2 proxy pixels), or why it can't be: another picture, cropped or distorted unlike the
 /// render, or an aspect ratio more than 2% from the render's.
 pub(super) fn align(
@@ -399,73 +403,89 @@ pub(super) fn align(
         .collect();
     let ours = detail(&green, w, h);
     let regions = regions(w, h);
-    let mut best: Option<(f32, Alignment)> = None;
-    let consider = |best: &mut Option<(f32, Alignment)>, scale, radial, shift| {
-        super::stopped(cancel)?;
-        let sampled = sample(p, &integral, [w, h], scale, radial, shift);
-        let lum: Vec<f32> = sampled.pro.iter().map(|q| luminance(*q)).collect();
-        let theirs = detail(&lum, w, h);
-        let r = regions.map(|region| correlation(&ours, &theirs, w, region));
-        let mean = r.iter().sum::<f32>() / 5.;
-        if best.is_none_or(|(m, _)| mean > m) {
-            let regions = r;
-            let alignment = Alignment {
-                scale,
-                radial,
-                shift,
-                regions,
-            };
-            *best = Some((mean, alignment));
-        }
-        Ok::<(), Refusal>(())
+    // The best of `tries` (scale, radial, shift), the first of equals, and `best`.
+    let search = |tries: Vec<(f32, [f32; 2], [f32; 2])>, best: Option<(f32, Alignment)>| {
+        let scored = tries
+            .into_par_iter()
+            .map(|(scale, radial, shift)| {
+                super::stopped(cancel)?;
+                let sampled = sample(p, &integral, [w, h], scale, radial, shift);
+                let lum: Vec<f32> = sampled.pro.iter().map(|q| luminance(*q)).collect();
+                let theirs = detail(&lum, w, h);
+                let regions = regions.map(|region| correlation(&ours, &theirs, w, region));
+                let alignment = Alignment {
+                    scale,
+                    radial,
+                    shift,
+                    regions,
+                };
+                Ok((regions.iter().sum::<f32>() / 5., alignment))
+            })
+            .collect::<Result<Vec<_>, Refusal>>()?;
+        let found = scored.into_iter().fold(best, |best, tried| match best {
+            Some((mean, _)) if mean >= tried.0 => best,
+            _ => Some(tried),
+        });
+        Ok::<_, Refusal>(found)
     };
+    let scale_of = |s: i32| 1. + s as f32 * 0.01;
+    let shifts = || (-2..=2).flat_map(|dy| (-2..=2).map(move |dx| [dx as f32, dy as f32]));
     // Scale and shift; then, only where that isn't enough, the lens: scale and the
     // r² term, the r⁴ term with it, and the shift again. The whole product would take
     // many thousands of samples.
-    for s in -3..=3 {
-        for dy in -2..=2 {
-            for dx in -2..=2 {
-                let shift = [dx as f32, dy as f32];
-                consider(&mut best, 1. + s as f32 * 0.01, [0., 0.], shift)?;
-            }
-        }
-    }
+    let tries = (-3..=3)
+        .flat_map(|s| shifts().map(move |shift| (scale_of(s), [0., 0.], shift)))
+        .collect();
+    let mut best = search(tries, None)?;
     let lined_up = |best: &Option<(f32, Alignment)>| {
         best.is_some_and(|(_, a)| a.regions.iter().all(|r| *r >= MIN_CORRELATION))
     };
     if !lined_up(&best) {
         let at = best.expect("searched").1;
-        for s in -3..=3 {
-            for k in -32..=32 {
-                let radial = [k as f32 * 0.005, 0.];
-                consider(&mut best, 1. + s as f32 * 0.01, radial, at.shift)?;
-            }
-        }
+        let tries = (-12..=12)
+            .flat_map(|s| (-16..=16).map(move |k| (scale_of(s), [k as f32 * 0.01, 0.], at.shift)))
+            .collect();
+        best = search(tries, best)?;
         let at = best.expect("searched").1;
-        for k1 in -10..=10 {
-            for k0 in -4..=4 {
-                let radial = [at.radial[0] + k0 as f32 * 0.01, k1 as f32 * 0.01];
-                consider(&mut best, at.scale, radial, at.shift)?;
-            }
-        }
+        let tries = (-5..=5)
+            .flat_map(|k1| {
+                (-2..=2).map(move |k0| {
+                    let radial = [at.radial[0] + k0 as f32 * 0.01, k1 as f32 * 0.02];
+                    (at.scale, radial, at.shift)
+                })
+            })
+            .collect();
+        best = search(tries, best)?;
         let at = best.expect("searched").1;
-        for dy in -2..=2 {
-            for dx in -2..=2 {
-                consider(&mut best, at.scale, at.radial, [dx as f32, dy as f32])?;
-            }
-        }
+        let tries = shifts().map(|shift| (at.scale, at.radial, shift)).collect();
+        best = search(tries, best)?;
+        // The coarse steps can leave the frame's edges a pixel out: finer around them.
+        let at = best.expect("searched").1;
+        let tries = (-2..=2)
+            .flat_map(|s| {
+                (-2..=2).flat_map(move |k0| {
+                    (-2..=2).map(move |k1| {
+                        let radial = [
+                            at.radial[0] + k0 as f32 * 0.004,
+                            at.radial[1] + k1 as f32 * 0.008,
+                        ];
+                        (at.scale + s as f32 * 0.004, radial, at.shift)
+                    })
+                })
+            })
+            .collect();
+        best = search(tries, best)?;
     }
     let (_, alignment) = best.expect("searched");
     let worst = alignment.regions[1..]
         .iter()
         .copied()
         .fold(f32::INFINITY, f32::min);
-    let quadrant = if strict {
-        MIN_CORRELATION
-    } else {
-        MIN_QUADRANT
+    let (centre, quadrant) = match strict {
+        true => (MIN_CORRELATION, MIN_CORRELATION),
+        false => (MIN_CENTRE, MIN_QUADRANT),
     };
-    if alignment.regions[0] < MIN_CORRELATION || worst < quadrant {
+    if alignment.regions[0] < centre || worst < quadrant {
         let worst = worst.min(alignment.regions[0]);
         return Err(Refusal {
             reason: format!(

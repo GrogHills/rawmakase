@@ -307,6 +307,70 @@ fn refine_table(base: &CameraProfile, look: &mut FittedLook, scene: &[Rgb], targ
             std::array::from_fn(|c| (now[c] + step[c] as f32).clamp(-LIMITS[c], LIMITS[c]));
         *entry = [next[0], next[1].exp(), next[2].exp()];
     }
+    smooth_table(&mut look.table);
+}
+/// How much a node may differ from its neighbour along hue, saturation and value, for
+/// the hue shift (degrees) and the logarithms of the saturation and value scales.
+/// Without this a gradient of skin crossing a node between two photographed colours
+/// bends into contours; the slopes also keep the table's output in the input's order.
+/// Hue along hue is the loosest, short of reversing: a camera draws skin's hues together,
+/// and a table that can't leaves a face blotchy and off in hue.
+const SLOPES: [[f32; 3]; 3] = [[4.5, 5., 5.], [0.08, 0.12, 0.12], [0.04, 0.12, 0.12]];
+
+/// The closest table, in sweeps along each axis, whose neighbouring nodes respect
+/// [`SLOPES`]; the neutral column stays as it is.
+fn smooth_table(table: &mut [[f32; 3]]) {
+    let [nh, ns, nv] = TABLE_DIMS;
+    let index = |h: usize, s: usize, v: usize| (v * nh + h) * ns + s;
+    let log = |e: [f32; 3]| [e[0], e[1].ln(), e[2].ln()];
+    let mut logged: Vec<[f32; 3]> = table.iter().map(|e| log(*e)).collect();
+    let limit = |to: &mut f32, from: f32, slope: f32| *to = to.clamp(from - slope, from + slope);
+    for _ in 0..2 {
+        for c in 0..3 {
+            for v in 0..nv {
+                for s in 1..ns {
+                    // Twice around: hue is a circle.
+                    for h in 0..2 * nh {
+                        let (a, b) = (index(h % nh, s, v), index((h + 1) % nh, s, v));
+                        let from = logged[a][c];
+                        limit(&mut logged[b][c], from, SLOPES[c][0]);
+                    }
+                    for h in (0..2 * nh).rev() {
+                        let (a, b) = (index((h + 1) % nh, s, v), index(h % nh, s, v));
+                        let from = logged[a][c];
+                        limit(&mut logged[b][c], from, SLOPES[c][0]);
+                    }
+                }
+            }
+            for v in 0..nv {
+                for h in 0..nh {
+                    for s in 1..ns {
+                        let from = logged[index(h, s - 1, v)][c];
+                        limit(&mut logged[index(h, s, v)][c], from, SLOPES[c][1]);
+                    }
+                    for s in (1..ns - 1).rev() {
+                        let from = logged[index(h, s + 1, v)][c];
+                        limit(&mut logged[index(h, s, v)][c], from, SLOPES[c][1]);
+                    }
+                }
+            }
+            for h in 0..nh {
+                for s in 1..ns {
+                    for v in 1..nv {
+                        let from = logged[index(h, s, v - 1)][c];
+                        limit(&mut logged[index(h, s, v)][c], from, SLOPES[c][2]);
+                    }
+                    for v in (0..nv - 1).rev() {
+                        let from = logged[index(h, s, v + 1)][c];
+                        limit(&mut logged[index(h, s, v)][c], from, SLOPES[c][2]);
+                    }
+                }
+            }
+        }
+    }
+    for (entry, l) in table.iter_mut().zip(&logged) {
+        *entry = [l[0], l[1].exp(), l[2].exp()];
+    }
 }
 fn gauss(d: f32, sigma: f32) -> f32 {
     (-0.5 * (d / sigma).powi(2)).exp()
@@ -572,6 +636,41 @@ mod tests {
                     .map(|x| v * (1. - s * (0.5 + 0.5 * (x * std::f32::consts::TAU).cos())))
             })
             .collect()
+    }
+
+    /// Skin in two lights, nearly the same colour and asked for very different ones:
+    /// the table bends only as far as its slopes allow, or a gradient shows contours.
+    #[test]
+    fn a_table_never_steps_between_neighbouring_nodes() {
+        let base = base();
+        let mut scene = Vec::new();
+        let mut target = Vec::new();
+        for i in 0..4000 {
+            let t = i as f32 / 4000.;
+            let warm = i % 2 == 0;
+            scene.push([0.3 + 0.1 * t, 0.2 + 0.05 * t, 0.15]);
+            target.push(if warm {
+                [0.6, 0.3, 0.1]
+            } else {
+                [0.2, 0.2, 0.5]
+            });
+        }
+        let look = colour_look(&base, &scene, &target);
+        let [nh, ns, nv] = TABLE_DIMS;
+        let at = |h: usize, s: usize, v: usize| look.table[(v * nh + h) * ns + s];
+        for v in 0..nv {
+            for s in 1..ns {
+                for h in 0..nh {
+                    let (a, b) = (at(h, s, v), at((h + 1) % nh, s, v));
+                    assert!(
+                        (a[0] - b[0]).abs() <= SLOPES[0][0] + 1e-3,
+                        "hue {a:?} {b:?}"
+                    );
+                    assert!((a[1].ln() - b[1].ln()).abs() <= SLOPES[1][0] + 1e-3);
+                    assert!((a[2].ln() - b[2].ln()).abs() <= SLOPES[2][0] + 1e-3);
+                }
+            }
+        }
     }
 
     #[test]

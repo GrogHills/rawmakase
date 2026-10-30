@@ -1,7 +1,7 @@
 //! Camera Look (fitted): a profile fitted to one photo's embedded JPEG, the maker's
 //! in-camera rendering (docs/lightroom-profiles.md#camera-look-fitted).
 //!
-//! The photo is rendered small (192 pixels on the long edge, from a render four
+//! The photo is rendered small (192 pixels on the long edge, from stages four
 //! times that reduced in boxes) at its default crop and orientation, with the
 //! camera's built-in lens corrections, which its JPEG has, and no others. The
 //! preview is reduced to the same pixels, aligned, and masked where it can't be
@@ -40,7 +40,7 @@ type Rgb = [f32; 3];
 
 /// The fit's version: part of a fit cache's key, raised whenever what a fit makes
 /// of a photo changes.
-pub const FIT_VERSION: u32 = 2;
+pub const FIT_VERSION: u32 = 3;
 /// The proxy's long edge, and how much larger its renders are.
 const PROXY_EDGE: u32 = 192;
 const RENDER_FACTOR: u32 = 4;
@@ -163,13 +163,23 @@ fn full_render(
         .map_err(|e| refuse(format!("{e:#}")))?;
     let linear: Vec<Rgb> = out.pixels.iter().map(|p| p.map(srgb_decode)).collect();
     let (w, h, reduced) = pairs::reduce(&linear, out.width, out.height);
-    if [w, h] != size {
+    if [w, h] == size {
+        return Ok(reduced);
+    }
+    // A pixel or two of rounding, from the render's whole-pixel crop: the same picture.
+    if w.abs_diff(size[0]) > 2 || h.abs_diff(size[1]) > 2 {
         return Err(refuse(format!(
             "The render is {w} × {h}, its stages {} × {}",
             size[0], size[1]
         )));
     }
-    Ok(reduced)
+    let at = |i: u32, from: u32, to: u32| {
+        ((u64::from(i) * 2 + 1) * u64::from(from) / (2 * u64::from(to))) as u32
+    };
+    Ok((0..size[1])
+        .flat_map(|y| (0..size[0]).map(move |x| (x, y)))
+        .map(|(x, y)| reduced[(at(y, h, size[1]) * w + at(x, w, size[0])) as usize])
+        .collect())
 }
 
 /// `im` with each pixel 1 where the sensor reached 0.99 of its white in any channel
@@ -384,10 +394,18 @@ fn fit_pairs(
     if [sw, sh] != [w, h] {
         return Err(refuse("The photo's stages differ in size"));
     }
-    let baseline = full_render(im, &pairing_recipe(m, known.clone()), [w, h], cancel)?;
+    // Renders judge a look at the proxy's size: a small copy serves, at a fraction of
+    // the half-size photo's cost.
+    let small = develop::preview(im, PROXY_EDGE * RENDER_FACTOR * 2);
+    let baseline = full_render(&small, &pairing_recipe(m, known.clone()), [w, h], cancel)?;
     report.baseline = gate::score(&baseline, &target_srgb, &testing, w, h);
     if fitted_matrix {
-        let base_only = full_render(im, &pairing_recipe(m, Some(base.clone())), [w, h], cancel)?;
+        let base_only = full_render(
+            &small,
+            &pairing_recipe(m, Some(base.clone())),
+            [w, h],
+            cancel,
+        )?;
         let matrix_de00 = known.as_ref().map_or(0., |k| {
             matrix_distance(k, &base, &pick(&proxy.camera, &fitting))
         });
@@ -398,30 +416,25 @@ fn fit_pairs(
     }
     stopped(cancel)?;
     let fit_scene = pick(&scene, &fitting);
-    let looks: Vec<(Kind, fitted::FittedLook)> = if report.monochrome {
-        vec![(
-            Kind::Monochrome,
-            solve::monochrome_look(&fit_scene, &fit_target),
-        )]
+    let kinds: &[Kind] = if report.monochrome {
+        &[Kind::Monochrome]
     } else {
-        vec![
-            (
-                Kind::Colour,
-                solve::colour_look(&base, &fit_scene, &fit_target),
-            ),
-            (
-                Kind::ToneOnly,
-                solve::tone_look(&base, &fit_scene, &fit_target),
-            ),
-        ]
+        &[Kind::Colour, Kind::ToneOnly]
     };
     let mut chosen = None;
     stopped(cancel)?;
-    for (kind, look) in looks {
+    // The tone-only look is the fallback: only a refused colour look needs it fitted
+    // and rendered.
+    for &kind in kinds {
         stopped(cancel)?;
+        let look = match kind {
+            Kind::Colour => solve::colour_look(&base, &fit_scene, &fit_target),
+            Kind::ToneOnly => solve::tone_look(&base, &fit_scene, &fit_target),
+            Kind::Monochrome => solve::monochrome_look(&fit_scene, &fit_target),
+        };
         let profile = fitted::with_look(&base, &look).map_err(|e| refuse(format!("{e:#}")))?;
         let render = full_render(
-            im,
+            &small,
             &pairing_recipe(m, Some(profile.clone())),
             [w, h],
             cancel,
@@ -448,9 +461,10 @@ fn fit_pairs(
             scores,
             refused,
         });
-        if accepted && chosen.is_none() {
+        if accepted {
             report.kind = Some(kind);
             chosen = Some(profile);
+            break;
         }
     }
     chosen.ok_or_else(|| {
