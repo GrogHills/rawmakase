@@ -19,10 +19,10 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 
 [features]
 default = ["software-hevc"]
-# HEIC photos decoded in pure Rust where the system has no HEVC decoder for
-# RAWmakase to use. A packager who leaves software HEVC decoders out (for
-# HEVC's patents) builds with --no-default-features: HEIF photos are then
-# listed, with their metadata, but not shown or edited.
+# HEIC photos decoded in pure Rust (rust_h265), on every platform. A packager
+# who leaves software HEVC decoders out (for HEVC's patents) builds with
+# --no-default-features: HEIF photos are then listed, with their metadata, but
+# not shown or edited.
 software-hevc = ["rawmakase-decode/software-hevc"]
 
 [dependencies]

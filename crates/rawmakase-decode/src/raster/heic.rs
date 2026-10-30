@@ -1,14 +1,11 @@
 //! A HEIC (a HEIF of HEVC) still: our reading of its container
-//! ([`rawmakase_interop::isobmff`]) here, its pixels decoded by the system's
-//! HEVC decoder where it has one for RAWmakase to use (macOS's ImageIO,
-//! `imageio`; Windows Imaging Component, `wic`), and otherwise by RAWmakase's
-//! own (`software`). Either way the
-//! header here says the size, crop, colour and orientation, and what Develop
-//! refuses.
+//! ([`rawmakase_interop::isobmff`]) here, which says the size, crop, colour
+//! and orientation, and what Develop refuses; its pixels decoded by
+//! RAWmakase's own HEVC decoder (`software`), the same on every platform.
 //!
-//! A build without a decoder (on Linux without the `software-hevc` feature,
-//! for packagers who leave software HEVC decoders out) reads the header, so
-//! the photo is listed with its size and metadata, but refuses its pixels.
+//! A build without the decoder (without the `software-hevc` feature, for
+//! packagers who leave software HEVC decoders out) reads the header, so the
+//! photo is listed with its size and metadata, but refuses its pixels.
 //!
 //! A phone's photo is a grid (`grid`) of tiles, 512×512 on an iPhone, each its
 //! own HEVC picture. A clean aperture (`clap`) crops the picture, before its
@@ -17,10 +14,9 @@
 //! The colour comes from the `colr` boxes of the image, or of its first tile
 //! when the image has none of that kind (an iPhone's tiles carry the `nclx`):
 //! an ICC profile, or one built from the CICP code points; a HEIC with neither
-//! is taken as sRGB. For RAWmakase's own decoder the matrix and range come
-//! from the `nclx` box; without one they are taken as BT.601 and full range,
-//! what phones and libheif write (the HEVC header's own are not read); a
-//! system decoder chooses them itself. Alpha, depth maps, gain maps and
+//! is taken as sRGB. The matrix and range come from the `nclx` box; without
+//! one they are taken as BT.601 and full range, what phones and libheif write
+//! (the HEVC header's own are not read). Alpha, depth maps, gain maps and
 //! thumbnails are not read.
 use super::avif::{self, Nclx};
 use super::{Unsupported, hevc};
@@ -32,29 +28,20 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-#[cfg(target_os = "macos")]
-mod imageio;
-#[cfg(target_os = "macos")]
-use imageio::pixels;
-#[cfg(windows)]
-mod wic;
-#[cfg(windows)]
-use wic::pixels;
-#[cfg(all(feature = "software-hevc", not(any(target_os = "macos", windows))))]
+#[cfg(feature = "software-hevc")]
 mod software;
-#[cfg(all(feature = "software-hevc", not(any(target_os = "macos", windows))))]
+#[cfg(feature = "software-hevc")]
 use software::pixels;
 
 /// No decoder in this build.
-#[cfg(not(any(feature = "software-hevc", target_os = "macos", windows)))]
+#[cfg(not(feature = "software-hevc"))]
 fn pixels(_: HeicFile) -> Result<Pixels> {
     bail!("This build of RAWmakase has no HEVC decoder, so it can't show HEIF images")
 }
 
-/// Decoded pixels: `width` × `height` of interleaved RGB, 8-bit samples or
-/// 16-bit ones (native endian), as [`HeicFile`]'s colour type says, in the
-/// colour space its profile says: the whole picture, or (a system decoder
-/// that crops by the `clap` itself) the clean aperture alone.
+/// The decoded picture, before its crop: `width` × `height` of interleaved
+/// RGB, 8-bit samples or 16-bit ones (native endian), as [`HeicFile`]'s colour
+/// type says, in the colour space its profile says.
 struct Pixels {
     width: u32,
     height: u32,
@@ -87,11 +74,7 @@ struct Layout {
     /// The pictures, row by row, `columns` to a row: each item and its HEVC
     /// configuration, one for each item a grid lists however often.
     tiles: Vec<(u32, Arc<hevc::Config>)>,
-    // RAWmakase's own decoder lays out the tiles; a platform's the file.
-    #[cfg_attr(
-        not(all(feature = "software-hevc", not(any(target_os = "macos", windows)))),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(feature = "software-hevc"), allow(dead_code))]
     columns: u32,
     /// Each picture's size.
     tile: (u32, u32),
@@ -101,9 +84,6 @@ pub(super) struct HeicFile {
     crop: Crop,
     /// More than 8 bits per sample, from `hvcC`.
     deep: bool,
-    /// Where the file is, for a system decoder to open.
-    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
-    path: std::path::PathBuf,
     /// The file and its boxes, to read the pictures from when decoding.
     file: std::fs::File,
     heif: Heif,
@@ -159,22 +139,13 @@ impl HeicFile {
             "The HEIF image's tiles differ in depth or chroma"
         );
         let animated = [b"msf1", b"hevc", b"hevx", b"hevm", b"hevs"];
-        // RAWmakase's own decoder reads 4:2:0 and 4:4:4: the others are
-        // refused from the header, so Develop says why, as for a tiled AVIF.
-        // The system's decoders decide for themselves.
-        let own = cfg!(all(
-            feature = "software-hevc",
-            not(any(target_os = "macos", windows))
-        ));
-        let refused = if cfg!(not(any(
-            feature = "software-hevc",
-            target_os = "macos",
-            windows
-        ))) {
+        // RAWmakase's decoder reads 4:2:0 and 4:4:4: the others are refused
+        // from the header, so Develop says why, as for a tiled AVIF.
+        let refused = if cfg!(not(feature = "software-hevc")) {
             Some(Unsupported("HEIF".into()))
-        } else if own && chroma == 0 {
+        } else if chroma == 0 {
             Some(Unsupported("monochrome HEIF".into()))
-        } else if own && chroma == 2 {
+        } else if chroma == 2 {
             Some(Unsupported("4:2:2 HEIF".into()))
         } else if nclx.is_some_and(Nclx::hdr) {
             Some(Unsupported("HDR".into()))
@@ -186,7 +157,6 @@ impl HeicFile {
         Ok(Self {
             crop,
             deep: depth > 8,
-            path: path.to_path_buf(),
             file,
             orientation: avif::transforms(&props),
             heif,
@@ -201,9 +171,8 @@ impl HeicFile {
         self.refused.as_ref().map(|r| Unsupported(r.0.clone()))
     }
 
-    /// Whether every picture's data is in the file, before any decoder reads
-    /// it: the header, not the decoder, says a file cut short is one, whose
-    /// pixels a system decoder might make up for.
+    /// Whether every picture's data is in the file, before any is decoded: a
+    /// grid cut short is refused at once, not after its first tiles.
     fn stored(&mut self) -> Result<()> {
         let mut checked = std::collections::HashSet::new();
         for (id, _) in &self.layout.tiles {
@@ -213,15 +182,6 @@ impl HeicFile {
             );
         }
         Ok(())
-    }
-
-    /// Whether a picture of `width` × `height` is this image: the whole
-    /// picture, or its crop alone. A system decoder's size is checked so
-    /// before anything that size is allocated.
-    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
-    fn expects(&self, width: u32, height: u32) -> bool {
-        (width, height) == (self.layout.width, self.layout.height)
-            || (width, height) == (self.crop.width, self.crop.height)
     }
 }
 
@@ -410,16 +370,9 @@ impl ImageDecoder for HeicFile {
         let full = (self.layout.width, self.layout.height);
         self.stored().map_err(failed)?;
         let Pixels { width, height, rgb } = pixels(self).map_err(failed)?;
-        // The whole picture, cropped here, or the crop alone: any other size
-        // is not the image the header describes (a system decoder that turned
-        // it, say), and is not shown.
-        let (left, top) = if (width, height) == full {
-            (crop.left, crop.top)
-        } else if (width, height) == (crop.width, crop.height) {
-            (0, 0)
-        } else {
+        if (width, height) != full {
             return Err(failed(anyhow!("The HEIF image is not the size it says")));
-        };
+        }
         // Bytes per pixel: three samples of one or two bytes.
         let pixel = if deep { 6 } else { 3 };
         let (row, kept) = (width as usize * pixel, crop.width as usize * pixel);
@@ -427,7 +380,7 @@ impl ImageDecoder for HeicFile {
             return Err(failed(anyhow!("The HEIF image is not the size it says")));
         }
         for (y, out) in buf.chunks_exact_mut(kept).enumerate() {
-            let start = (top as usize + y) * row + left as usize * pixel;
+            let start = (crop.top as usize + y) * row + crop.left as usize * pixel;
             out.copy_from_slice(&rgb[start..start + kept]);
         }
         Ok(())

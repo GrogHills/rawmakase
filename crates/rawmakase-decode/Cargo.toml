@@ -9,10 +9,8 @@ publish = false
 
 [features]
 default = ["software-hevc"]
-# HEIC decoded in pure Rust (rust_h265) where the system has no HEVC decoder
-# for RAWmakase to use; macOS and Windows decode HEIC with their own (ImageIO,
-# Windows Imaging Component). Without it such a build lists HEIF photos but
-# can't show them.
+# HEIC decoded in pure Rust (rust_h265), on every platform. Without it a
+# build lists HEIF photos but can't show them.
 software-hevc = ["dep:rust_h265"]
 # The model's fixtures, for tests that share them.
 test-support = ["rawmakase-model/test-support", "rawmakase-engine/test-support"]
@@ -32,6 +30,9 @@ jxl-oxide = { version = "0.12.6", default-features = false, features = ["image",
 rav1d = { version = "1.1.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 # AV1's and HEVC's YUV to RGB, in pure Rust.
 yuv = "0.8.19"
+# HEIC's HEVC in pure Rust, without `unsafe` or build scripts (the
+# software-hevc feature).
+rust_h265 = { version = "0.2.0", optional = true }
 # The errno rav1d's C interface returns.
 libc = "0.2"
 # Colour management of JPEG, PNG and TIFF files, in pure Rust; the version `image` uses.
@@ -43,28 +44,12 @@ serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
 
-# HEIC's HEVC in pure Rust, without `unsafe` or build scripts (the
-# software-hevc feature), where the system has no decoder for RAWmakase.
-[target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
-rust_h265 = { version = "0.2.0", optional = true }
-
-# HEIC decoded by the system's ImageIO, drawn by CoreGraphics, in an
-# autorelease pool (objc2, the version the app builds).
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes", "CFData", "CFDictionary", "CFNumber", "CFURL"] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
-objc2-image-io = { version = "0.3", default-features = false, features = ["std", "CGImageSource", "objc2-core-graphics"] }
-
 # Background threads' scheduling priority (raw::spawn_background).
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
-# HEIC decoded by Windows Imaging Component, a COM API windows-sys has no
-# vtables for; the version the app builds.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Imaging", "Win32_System_Com"] }
 
 [dev-dependencies]
 rawmakase-raw = { path = "../rawmakase-raw", version = "0.1.0", features = ["test-support"] }

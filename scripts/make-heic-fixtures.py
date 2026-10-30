@@ -7,9 +7,8 @@ nothing comes from a camera or a photo. metadata.heic, ten-bit.heic, p3.heic,
 pq.heic and identity.heic are libheif's own files; the grid and the turned
 files are written here around HEVC x265 coded, so each has the boxes its test
 needs, and without x265's SEI banner, which would make them several kilobytes.
-All but identity.heic are 4:2:0, as phones write, so the system decoders
-macOS and Windows use read them too; identity.heic (lossless 4:4:4 RGB) is for
-RAWmakase's own decoder.
+All but identity.heic (lossless 4:4:4 RGB) and wide.heic are 4:2:0, as phones
+write.
 """
 import importlib.util, io, sys
 from pathlib import Path

@@ -104,8 +104,6 @@ The `rawmakase-<version>-<arch>.AppImage` download is the same build as a single
 
 Run `rawmakase-v<version>-x86_64-pc-windows-msvc-setup.exe`, or `rawmakase-v<version>-aarch64-pc-windows-msvc-setup.exe` on an ARM64 PC. It installs for your user account only, without administrator rights, and adds RAWmakase to the Start menu. The installer is not code-signed yet, so Microsoft Defender SmartScreen may warn about an unrecognized app: choose **More info → Run anyway**. For a copy without installing, extract `rawmakase-v<version>-<arch>-pc-windows-msvc.zip` and run `rawmakase.exe` from the extracted folder.
 
-HEIC photos (from phones) are decoded by Windows itself, which needs Microsoft's **HEIF Image Extensions** and **HEVC Video Extensions** from the Microsoft Store; some PCs come with them. Without them HEIC photos are listed but not shown, and opening one says what to install.
-
 ### Updates and verification
 
 RAWmakase checks GitHub for a newer release after launch and once an hour, and shows a notice when one is out (turn the check off in Preferences). The Apple Silicon DMG and the Windows installer download and install the update themselves; Intel Macs, the Linux tarball and AppImage, the Windows archive and package-managed installs (Homebrew, DEB, RPM, Arch) are pointed at the release page or their package manager. Settings and catalogs are kept separately from the installed application, so reinstalling over an old version loses nothing.
@@ -126,7 +124,7 @@ make install PREFIX="$HOME/.local"    # binary, desktop entry, icon and licenses
 
 `make install` never builds, so `make && sudo make install PREFIX=/usr` does not compile as root. `make uninstall` removes the installed files.
 
-On Linux, HEIC photos are decoded by RAWmakase's own HEVC decoder (macOS and Windows decode them with their own). HEVC is patented, and some distributions leave software HEVC decoders out: `make CARGO_FLAGS=--no-default-features` builds without it, and HEIF photos are then listed, with their metadata, but not shown or edited (see [dependencies](docs/dependencies.md)).
+HEIC photos are decoded by RAWmakase's own HEVC decoder. HEVC is patented, and some distributions leave software HEVC decoders out: `make CARGO_FLAGS=--no-default-features` builds without it, and HEIF photos are then listed, with their metadata, but not shown or edited (see [dependencies](docs/dependencies.md)).
 
 On macOS, `packaging/macos/app.sh` builds `target/release/RAWmakase.app`, which you can open from Finder. It uses the Homebrew libraries installed on your Mac and is not a signed, self-contained distribution.
 

@@ -934,7 +934,7 @@ mod tests {
             // A JPEG transcode, so the pixels are only near.
             ("metadata.jxl", "c.webp", 8),
             // Lossy 4:2:0, where there is a HEVC decoder.
-            #[cfg(any(target_os = "macos", all(feature = "software-hevc", not(windows))))]
+            #[cfg(feature = "software-hevc")]
             ("grid.heic", "d.jpg", 4),
         ] {
             let path = dir.path().join(to);
@@ -1229,7 +1229,7 @@ mod tests {
 
     /// libheif's own HEIC: 4:2:0 in a 64×64 picture it crops (`clap`) to the
     /// 16×12 drawing.
-    #[cfg(any(target_os = "macos", all(feature = "software-hevc", not(windows))))]
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_decodes_cropped_with_its_colours() {
         assert_eq!(super::dimensions(&fixture("metadata.heic")), Some((16, 12)));
@@ -1244,7 +1244,7 @@ mod tests {
     /// A grid as an iPhone writes one: four tiles laid in place and cut to
     /// the grid's size, each converted by the matrix and range of its own
     /// `nclx` (BT.709, limited range), as the grid has only an ICC profile.
-    #[cfg(any(target_os = "macos", all(feature = "software-hevc", not(windows))))]
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_grid_is_laid_out_and_cut_to_its_size() {
         assert_eq!(super::dimensions(&fixture("grid.heic")), Some((120, 100)));
@@ -1263,7 +1263,7 @@ mod tests {
         assert!(last.iter().all(|v| *v >= 250), "{last:?}");
     }
 
-    #[cfg(any(target_os = "macos", all(feature = "software-hevc", not(windows))))]
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_decodes_upright_by_its_rotation_and_mirror() {
         // As rotated.avif: irot 1 brings the top-right (green) to the top-left,
@@ -1285,7 +1285,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "macos", all(feature = "software-hevc", not(windows))))]
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_ten_bit_heic_keeps_its_depth_and_colours() -> anyhow::Result<()> {
         assert_corners_near(corners(&decode(&fixture("ten-bit.heic"))?), UPRIGHT, 1);
@@ -1300,7 +1300,7 @@ mod tests {
 
     /// Lossless 4:4:4 through the identity matrix (GBR): RAWmakase's own
     /// decoder gives the drawing back exactly.
-    #[cfg(all(feature = "software-hevc", not(any(target_os = "macos", windows))))]
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_lossless_rgb_heic_decodes_exactly() {
         let image = decode(&fixture("identity.heic")).unwrap();
@@ -1308,7 +1308,7 @@ mod tests {
         assert_eq!(image.get_pixel(8, 6).0, [128; 3]);
     }
 
-    #[cfg(any(target_os = "macos", all(feature = "software-hevc", not(windows))))]
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heics_cicp_colours_are_converted() {
         // As p3.avif, but 4:2:0.
@@ -1324,30 +1324,16 @@ mod tests {
     }
 
     /// A PQ HEIC is shown, its reference white as white, but not edited; nor
-    /// is a still in a file whose brands say it holds a sequence. The
-    /// refusals come from the header, wherever the pixels come from; how an
-    /// HDR picture's preview looks, and whether a system decoder shows a still
-    /// it takes for a sequence, are its own.
-    #[cfg(any(target_os = "macos", windows, feature = "software-hevc"))]
+    /// is a still in a file whose brands say it holds a sequence.
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn hdr_and_sequence_heics_are_refused_for_develop() {
         assert_eq!(super::probe(&fixture("pq.heic")).unwrap_err().0, "HDR");
-        if cfg!(all(
-            feature = "software-hevc",
-            not(any(target_os = "macos", windows))
-        )) {
-            let image = decode(&fixture("pq.heic")).unwrap();
-            // The grey as hdr_previews_show_reference_white_as_white's, within
-            // lossy 4:2:0's error.
-            let centre = image.get_pixel(8, 6).0;
-            assert!(centre.iter().all(|v| v.abs_diff(183) <= 6), "{centre:?}");
-        } else if cfg!(target_os = "macos") {
-            // ImageIO's HDR decoding is its own, but the grey is shown neither
-            // black nor clipped.
-            let image = decode(&fixture("pq.heic")).unwrap();
-            let centre = image.get_pixel(8, 6).0;
-            assert!(centre.iter().all(|v| (16..=250).contains(v)), "{centre:?}");
-        }
+        let image = decode(&fixture("pq.heic")).unwrap();
+        // The grey as hdr_previews_show_reference_white_as_white's, within
+        // lossy 4:2:0's error.
+        let centre = image.get_pixel(8, 6).0;
+        assert!(centre.iter().all(|v| v.abs_diff(183) <= 6), "{centre:?}");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sequence.heic");
         let mut bytes = std::fs::read(fixture("metadata.heic")).unwrap();
@@ -1355,18 +1341,12 @@ mod tests {
         bytes[at..at + 4].copy_from_slice(b"msf1");
         std::fs::write(&path, bytes).unwrap();
         assert_eq!(super::probe(&path).unwrap_err().0, "animated");
-        if cfg!(all(
-            feature = "software-hevc",
-            not(any(target_os = "macos", windows))
-        )) {
-            assert!(decode(&path).is_ok());
-        }
+        assert!(decode(&path).is_ok());
     }
 
     /// The size and the refusal come from a HEIC's header: its HEVC data is
-    /// read only to decode it, and a picture cut short is an error on every
-    /// platform, whatever a system decoder would make of it.
-    #[cfg(any(target_os = "macos", windows, feature = "software-hevc"))]
+    /// read only to decode it, and a picture cut short is an error.
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_header_is_read_without_its_image_data() {
         let dir = tempfile::tempdir().unwrap();
@@ -1435,7 +1415,7 @@ mod tests {
 
     /// 4:2:2 and monochrome HEVC, which RAWmakase does not decode, are
     /// refused from the header, so Develop says why rather than failing.
-    #[cfg(all(feature = "software-hevc", not(any(target_os = "macos", windows))))]
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_of_chroma_it_does_not_decode_is_refused_from_its_header() {
         let dir = tempfile::tempdir().unwrap();
@@ -1467,7 +1447,7 @@ mod tests {
     }
 
     /// A grid may list one tile several times; each place shows it.
-    #[cfg(any(target_os = "macos", all(feature = "software-hevc", not(windows))))]
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_grid_listing_a_tile_twice_shows_it_twice() {
         let dir = tempfile::tempdir().unwrap();
@@ -1490,7 +1470,7 @@ mod tests {
 
     /// A build without a HEVC decoder lists a HEIC with its size, but Develop
     /// refuses it and decoding says why.
-    #[cfg(not(any(target_os = "macos", windows, feature = "software-hevc")))]
+    #[cfg(not(feature = "software-hevc"))]
     #[test]
     fn without_a_decoder_a_heic_is_listed_but_refused() {
         assert_eq!(super::dimensions(&fixture("grid.heic")), Some((120, 100)));
@@ -1499,39 +1479,14 @@ mod tests {
         assert!(err.contains("no HEVC decoder"), "{err}");
     }
 
-    /// On Windows a HEIC is decoded by Microsoft's HEIF and HEVC extensions,
-    /// which a PC (CI's among them) may lack: it is then refused with what to
-    /// install, and otherwise decoded as elsewhere.
-    #[cfg(windows)]
-    #[test]
-    fn on_windows_a_heic_decodes_or_says_what_to_install() {
-        match decode(&fixture("grid.heic")) {
-            Ok(image) => {
-                assert_eq!(image.dimensions(), (120, 100));
-                assert_corners_near(corners(&image), UPRIGHT, 4);
-            }
-            Err(error) => {
-                let error = format!("{error:#}");
-                assert!(error.contains("HEVC Video Extensions"), "{error}");
-            }
-        }
-        // The header is RAWmakase's to read either way.
-        assert_eq!(super::dimensions(&fixture("grid.heic")), Some((120, 100)));
-    }
-
     /// A header saying a picture is smaller than it is coded is not believed:
-    /// the picture is refused, by RAWmakase's own decoder before it allocates
-    /// it, by a system decoder by its size.
+    /// the decoder refuses the picture before it allocates it.
+    #[cfg(feature = "software-hevc")]
     #[test]
     fn a_heic_coded_larger_than_its_header_says_is_refused() {
-        if cfg!(any(
-            target_os = "macos",
-            all(feature = "software-hevc", not(windows))
-        )) {
-            let image = decode(&fixture("wide.heic")).unwrap();
-            assert_eq!(image.dimensions(), (192, 128));
-            assert_corners_near(corners(&image), UPRIGHT, 4);
-        }
+        let image = decode(&fixture("wide.heic")).unwrap();
+        assert_eq!(image.dimensions(), (192, 128));
+        assert_corners_near(corners(&image), UPRIGHT, 4);
         let dir = tempfile::tempdir().unwrap();
         let mut bytes = std::fs::read(fixture("wide.heic")).unwrap();
         // ispe: 192 x 128 becomes 64 x 64.
@@ -1541,11 +1496,6 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         assert_eq!(super::dimensions(&path), Some((64, 64)));
         let error = format!("{:#}", decode(&path).unwrap_err());
-        if cfg!(all(
-            feature = "software-hevc",
-            not(any(target_os = "macos", windows))
-        )) {
-            assert!(error.contains("resource limit"), "{error}");
-        }
+        assert!(error.contains("resource limit"), "{error}");
     }
 }
