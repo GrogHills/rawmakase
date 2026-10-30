@@ -130,6 +130,8 @@ impl Library {
             .fill(theme::palette(ui.ctx()).photo_backdrop())
             .inner_margin(design::margin_same(margin))
             .show(ui, |ui| {
+                // Page Up and Page Down move by the rows wholly in view.
+                self.grid_page_rows = ((ui.available_height() / height).floor() as usize).max(1);
                 // A key moved the active photo: bring its row into view.
                 if std::mem::take(&mut self.scroll_to_active)
                     && let Some(at) = self.selection.active.and_then(|id| {

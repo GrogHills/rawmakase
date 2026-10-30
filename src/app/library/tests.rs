@@ -4014,3 +4014,48 @@ fn a_filmstrip_badge_collapses_an_open_stack_shown_whole() -> Result<()> {
     frame(&mut library, vec![]);
     Ok(())
 }
+/// Page Up and Page Down move the active photo a screen of rows, in its
+/// column, and Shift extends the selection; past the ends they stop at the
+/// first or last photo.
+#[test]
+fn page_keys_move_the_active_photo_a_screen_at_a_time() -> Result<()> {
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i"].map(|n| format!("{n}.RAF"));
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (_directory, mut library) = library_of(&names)?;
+    let ids = ids_of(&library);
+    // Two columns and two rows a screen: rows ab, cd, ef, gh, i.
+    library.grid_columns = 2;
+    library.grid_page_rows = 2;
+    let ctx = egui::Context::default();
+    let press = |library: &mut Library, key, modifiers| {
+        let events = vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }];
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| library.selection_keys(ui.ctx()),
+        );
+        output.textures_delta.clear();
+    };
+    library.select(Some(ids[1]));
+    press(&mut library, egui::Key::PageDown, egui::Modifiers::NONE);
+    assert_eq!(library.selected(), Some(ids[5]));
+    assert!(library.scroll_to_active);
+    press(&mut library, egui::Key::PageDown, egui::Modifiers::NONE);
+    assert_eq!(library.selected(), Some(ids[8]));
+    press(&mut library, egui::Key::PageUp, egui::Modifiers::NONE);
+    assert_eq!(library.selected(), Some(ids[4]));
+    press(&mut library, egui::Key::PageUp, egui::Modifiers::SHIFT);
+    assert_eq!(library.selected(), Some(ids[0]));
+    assert_eq!(library.selected_ids(), ids[..5]);
+    press(&mut library, egui::Key::PageUp, egui::Modifiers::NONE);
+    assert_eq!(library.selected_ids(), [ids[0]]);
+    Ok(())
+}
