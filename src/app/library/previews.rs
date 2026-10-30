@@ -236,6 +236,9 @@ struct Queued {
     job: EditJob,
     /// The cache had no preview for it when asked; it waits for a render.
     missed: bool,
+    /// Asked ahead for a list no longer shown: answered without a render
+    /// unless its photo is shown.
+    dropped: bool,
 }
 struct Running {
     slot: u64,
@@ -272,7 +275,11 @@ impl EditQueue {
         if state.closed {
             return Err(Closed);
         }
-        state.jobs.push(Queued { job, missed: false });
+        state.jobs.push(Queued {
+            job,
+            missed: false,
+            dropped: false,
+        });
         self.0.changed.notify_all();
         Ok(())
     }
@@ -288,6 +295,18 @@ impl EditQueue {
         if pace == Pace::Background {
             for running in state.running.iter().filter(|r| r.full) {
                 running.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        self.0.changed.notify_all();
+    }
+    /// Drops the photos asked ahead and not started, for a list shown no
+    /// longer: each is answered `Skipped` unless it is shown by then. Renders
+    /// already under way finish.
+    pub(super) fn drop_ahead(&self) {
+        let mut state = self.0.lock();
+        for queued in &mut state.jobs {
+            if matches!(queued.job, EditJob::Render { ahead: true, .. }) {
+                queued.dropped = true;
             }
         }
         self.0.changed.notify_all();
@@ -317,6 +336,10 @@ impl Sent {
     pub(super) fn try_recv(&self) -> Option<EditJob> {
         let mut state = self.0.lock();
         (!state.jobs.is_empty()).then(|| state.jobs.remove(0).job)
+    }
+    /// How many jobs sent and not taken are dropped.
+    pub(super) fn dropped(&self) -> usize {
+        self.0.lock().jobs.iter().filter(|q| q.dropped).count()
     }
 }
 /// Threads the full pace renders on: every core but one.
@@ -641,9 +664,12 @@ fn next_step(shared: &Shared, wanted: &Wanted, full_threads: usize) -> Step {
         }
         let shown = wanted.lock().unwrap().clone();
         let full = state.pace == Pace::Full;
-        // Out of view, or asked ahead at a pace that renders none ahead.
+        // Out of view, or asked ahead at a pace that renders none ahead, or for
+        // a list no longer shown.
         if let Some(index) = state.jobs.iter().position(|q| match &q.job {
-            EditJob::Render { id, ahead, .. } => !shown.contains(id) && (!ahead || !full),
+            EditJob::Render { id, ahead, .. } => {
+                !shown.contains(id) && (!ahead || !full || q.dropped)
+            }
             EditJob::Store { .. } => false,
         }) {
             let EditJob::Render { id, ticket, .. } = state.jobs.remove(index).job else {
@@ -1219,7 +1245,11 @@ pub(super) mod tests {
     fn photos_asked_ahead_are_not_rendered_once_they_lost_their_reason() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let path = edited_png(directory.path(), "1.png")?;
-        let queued = |job| Queued { job, missed: false };
+        let queued = |job| Queued {
+            job,
+            missed: false,
+            dropped: false,
+        };
         // No cache to keep it in: rendered when shown.
         let shared = Arc::<Shared>::default();
         shared.lock().pace = Pace::Full;
@@ -1251,12 +1281,45 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn photos_asked_ahead_for_a_list_gone_are_dropped_unless_shown() {
+        let directory = Path::new("/nonexistent");
+        let (queue, _) = EditQueue::detached();
+        let wanted = Wanted::default();
+        wanted.lock().unwrap().insert(PhotoId(2));
+        queue.set_pace(Pace::Full);
+        for (id, ahead) in [(1, true), (2, true)] {
+            queue.send(render_job(id, directory, ahead)).unwrap();
+        }
+        queue.drop_ahead();
+        // Sent after the list changed: kept.
+        queue.send(render_job(3, directory, true)).unwrap();
+        // Not rendered, even at full pace; one shown since is, as a photo shown.
+        assert!(matches!(
+            next_step(&queue.0, &wanted, 2),
+            Step::Skip(PhotoId(1), 1)
+        ));
+        assert!(matches!(
+            next_step(&queue.0, &wanted, 2),
+            Step::Look(0, true)
+        ));
+        queue.0.lock().jobs.remove(0);
+        assert!(matches!(
+            next_step(&queue.0, &wanted, 2),
+            Step::Look(0, true)
+        ));
+    }
+
+    #[test]
     fn photos_shown_go_before_the_ones_asked_ahead() {
         let directory = Path::new("/nonexistent");
         let shared = Shared::default();
         let wanted = Wanted::default();
         wanted.lock().unwrap().extend([PhotoId(2), PhotoId(3)]);
-        let queued = |job| Queued { job, missed: false };
+        let queued = |job| Queued {
+            job,
+            missed: false,
+            dropped: false,
+        };
         {
             let mut state = shared.lock();
             state.pace = Pace::Full;

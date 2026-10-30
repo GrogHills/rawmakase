@@ -4096,6 +4096,13 @@ fn edited_previews_are_asked_ahead_only_at_full_pace_in_order_from_the_view() ->
         jobs.try_recv(),
         Some(previews::EditJob::Render { ahead: false, .. })
     ));
+    // Another list again: what was asked ahead and not started is dropped.
+    library.cache.edited_requested.remove(&photos[0].id);
+    library.cache.request_ahead(&photos, (2, &other), 2, edit);
+    assert_eq!(jobs.dropped(), 0);
+    library.cache.request_ahead(&photos, (3, &other), 2, edit);
+    assert_eq!(jobs.dropped(), 1);
+    assert_eq!(asked(&jobs), [photos[0].id]);
     // Shown by the time it is done: shown.
     let ticket = library.cache.edited_requested[&photos[0].id];
     result_tx.send(previews::EditResult::Ready(

@@ -301,7 +301,8 @@ impl PreviewTextures {
     /// for the edited previews of the `photos` at `order` not shown yet, a few
     /// at a time from position `start` on (and then from the first), up to
     /// [`AHEAD_WINDOW`] of them, so they come from the cache once shown;
-    /// `version` changes with `order`, which starts it over. `edit`
+    /// `version` changes with `order`, which starts it over and drops the
+    /// ones asked for the last list and not started. `edit`
     /// looks up each photo's edit when it is first asked about, as for a
     /// photo shown.
     pub(super) fn request_ahead(
@@ -311,6 +312,14 @@ impl PreviewTextures {
         start: usize,
         mut edit: impl FnMut(PhotoId) -> Option<EditSource>,
     ) {
+        // Another list: what was asked ahead for the last one and not started
+        // goes, so this one's come next.
+        if self.ahead_scan.0.0 != version {
+            if !self.ahead.is_empty() {
+                self.edit_tx.drop_ahead();
+            }
+            self.ahead_scan = ((version, start), 0);
+        }
         if self.pace != Pace::Full || order.is_empty() || !self.pending.is_empty() {
             return;
         }
