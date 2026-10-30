@@ -4059,3 +4059,58 @@ fn page_keys_move_the_active_photo_a_screen_at_a_time() -> Result<()> {
     assert_eq!(library.selected_ids(), [ids[0]]);
     Ok(())
 }
+/// A page is the rows wholly in view: with the grid scrolled half a row,
+/// Page Down lands on the row cut off at the bottom, never past it.
+#[test]
+fn a_page_is_the_rows_wholly_in_view() -> Result<()> {
+    let names: Vec<String> = (0..60).map(|n| format!("{n:02}.RAF")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (_directory, mut library) = library_of(&names)?;
+    let ids = ids_of(&library);
+    let ctx = egui::Context::default();
+    let run = |library: &mut Library, events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000., 700.),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            library.selection_keys(ui.ctx());
+            library.grid(ui, &mut Default::default(), false, None);
+        });
+        output.textures_delta.clear();
+    };
+    let key = |key| {
+        vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    };
+    // 1000 by 700 less 16 px margins: five columns of 193 px rows in a
+    // 668 px view, three rows and a half.
+    run(&mut library, vec![]);
+    assert_eq!(library.grid_columns, 5);
+    assert_eq!(library.grid_page_rows, 3);
+    // Scrolled half a row: rows 1 and 2 are whole, 0 and 3 cut off.
+    library.grid_offset = 96.;
+    library.keep_in_place = Some((ids[0], 0));
+    run(&mut library, vec![]);
+    assert_eq!(library.grid_offset, 96.);
+    assert_eq!(library.grid_page_rows, 2);
+    library.select(Some(ids[5]));
+    run(&mut library, key(egui::Key::PageDown));
+    assert_eq!(library.selected(), Some(ids[15]));
+    // The grid scrolls to show all of row 3, and the page is whole again.
+    run(&mut library, vec![]);
+    assert!(library.grid_offset <= 3. * 193. && 4. * 193. <= library.grid_offset + 668.);
+    assert_eq!(library.grid_page_rows, 3);
+    run(&mut library, key(egui::Key::PageUp));
+    assert_eq!(library.selected(), Some(ids[0]));
+    Ok(())
+}

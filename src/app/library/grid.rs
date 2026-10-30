@@ -130,8 +130,6 @@ impl Library {
             .fill(theme::palette(ui.ctx()).photo_backdrop())
             .inner_margin(design::margin_same(margin))
             .show(ui, |ui| {
-                // Page Up and Page Down move by the rows wholly in view.
-                self.grid_page_rows = ((ui.available_height() / height).floor() as usize).max(1);
                 // A key moved the active photo: bring its row into view.
                 if std::mem::take(&mut self.scroll_to_active)
                     && let Some(at) = self.selection.active.and_then(|id| {
@@ -209,6 +207,12 @@ impl Library {
                 );
                 self.grid_kinetic.end(ui, glide);
                 self.grid_offset = output.state.offset.y;
+                // Page Up and Page Down move by the rows wholly in view, with
+                // half a point's grace for rounding.
+                let top = ((output.state.offset.y - 0.5) / height).ceil();
+                let bottom =
+                    ((output.state.offset.y + output.inner_rect.height() + 0.5) / height).floor();
+                self.grid_page_rows = (bottom - top).max(1.) as usize;
             });
         ui.spacing_mut().item_spacing = spacing;
         if let Some((photo, menu)) = metadata_edit
