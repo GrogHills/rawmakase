@@ -1496,6 +1496,6 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         assert_eq!(super::dimensions(&path), Some((64, 64)));
         let error = format!("{:#}", decode(&path).unwrap_err());
-        assert!(error.contains("resource limit"), "{error}");
+        assert!(error.contains("coded larger"), "{error}");
     }
 }
