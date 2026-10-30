@@ -12,7 +12,7 @@
 //! cargo test -p rawmakase-remote --test models -- --ignored
 //! ```
 
-use rawmakase_inference::{Coverage, LoadOptions, Point, Prompt, Provider, RgbImage, Subject};
+use rawmakase_inference::{Coverage, LoadOptions, Point, Prompt, Provider, RgbImage, Sky, Subject};
 use rawmakase_remote::client::RemoteSession;
 use rawmakase_remote::server::{Model, Server};
 use std::net::TcpListener;
@@ -75,7 +75,6 @@ fn the_remote_worker_returns_what_the_local_session_computed() {
     let mut session = Subject::load_with(&dir, &options).expect("the models load");
     let analysis = session.analyze(&image, &cancel).expect("analyze");
     let subject = analysis.subject().expect("subject");
-    let sky = analysis.sky().expect("sky");
     let clicked = session
         .segment(analysis.embedding(), &click(), &cancel)
         .expect("segment");
@@ -90,7 +89,6 @@ fn the_remote_worker_returns_what_the_local_session_computed() {
     assert_eq!(info.provider, "CPU");
     let analysis = remote.analyze(&image, &cancel).expect("remote analyze");
     same(&analysis.subject, &subject, "automatic subject");
-    same(&analysis.sky, &sky, "automatic sky");
     let remote_click = remote
         .segment(&analysis, &click(), &cancel)
         .expect("remote segment");
@@ -103,7 +101,7 @@ fn the_remote_worker_returns_what_the_local_session_computed() {
 /// session computed. The photo is read from the caller's disk and never
 /// leaves this machine; the test is ignored unless a path is given.
 #[test]
-#[ignore = "needs RAWMAKASE_TEST_MODEL, RAWMAKASE_ORT_LIB and RAWMAKASE_TEST_RGB (an sRGB JPEG)"]
+#[ignore = "needs RAWMAKASE_TEST_MODEL, RAWMAKASE_TEST_SKY_MODEL, RAWMAKASE_ORT_LIB and RAWMAKASE_TEST_RGB (an sRGB JPEG with sky)"]
 fn a_real_photo_selects_the_same_through_the_worker_process() {
     use image::imageops::FilterType;
 
@@ -133,7 +131,11 @@ fn a_real_photo_selects_the_same_through_the_worker_process() {
     let mut session = Subject::load_with(&dir, &options).expect("the models load");
     let analysis = session.analyze(&image, &cancel).expect("analyze");
     let subject = analysis.subject().expect("subject");
-    let sky = analysis.sky().expect("sky");
+    let sky_dir = std::env::var("RAWMAKASE_TEST_SKY_MODEL").unwrap();
+    let sky = Sky::load_with(std::path::Path::new(&sky_dir), &options)
+        .expect("the sky model loads")
+        .select(&image, &cancel)
+        .expect("sky");
     let chosen = |what: &str, coverage: &Coverage| {
         let share =
             coverage.data.iter().filter(|v| **v >= 128).count() as f32 / coverage.data.len() as f32;
@@ -181,6 +183,8 @@ fn a_real_photo_selects_the_same_through_the_worker_process() {
         .args([
             "--model",
             dir.to_str().unwrap(),
+            "--sky-model",
+            &sky_dir,
             "--listen",
             "127.0.0.1:0",
             "--provider",
@@ -208,7 +212,11 @@ fn a_real_photo_selects_the_same_through_the_worker_process() {
     assert_eq!(info.provider, "CPU", "{info:?}");
     let analysis = remote.analyze(&image, &cancel).expect("remote analyze");
     same(&analysis.subject, &subject, "automatic subject");
-    same(&analysis.sky, &sky, "automatic sky");
+    same(
+        &remote.sky(&image, &cancel).expect("remote sky"),
+        &sky,
+        "automatic sky",
+    );
     let remote_click = remote
         .segment(&analysis, &click, &cancel)
         .expect("remote segment");

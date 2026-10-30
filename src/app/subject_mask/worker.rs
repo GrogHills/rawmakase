@@ -14,7 +14,8 @@ use crate::storage::bitmaps::Bitmap;
 use crate::storage::{FNV_OFFSET, fnv1a, mask_assets};
 use eframe::egui;
 use rawmakase_inference::{
-    Analysis, Coverage, InferenceError, LoadOptions, Prompt, RgbImage, SUBJECT, Session, Subject,
+    Analysis, Coverage, InferenceError, LoadOptions, Prompt, RgbImage, SKY, SUBJECT, Session, Sky,
+    SkySession, Subject,
 };
 use rawmakase_remote::{ClientError, RemoteAnalysis, RemoteSession};
 use std::path::PathBuf;
@@ -143,14 +144,18 @@ fn run(inbox: mpsc::Receiver<Message>) {
     }
 }
 
-/// The loaded model and the embedding of the photo last selected on. Over the
+/// The loaded models and the embedding of the photo last selected on. Over the
 /// remote endpoint, the worker's answer for the photo last asked about, so its
-/// clicks are answered from what it kept.
+/// clicks are answered from what it kept. The sky of the photo last asked about, from
+/// either, so finding it again costs nothing. Each model loads when first needed: the
+/// sky model is large and nothing else uses it.
 #[derive(Default)]
 struct State {
     session: Option<Session>,
+    sky_session: Option<SkySession>,
     analysis: Option<(String, Analysis)>,
     remote_analysis: Option<(String, RemoteAnalysis)>,
+    sky: Option<(String, Coverage)>,
 }
 
 fn select(job: &Job, state: &mut State) -> Result<Generated, Failure> {
@@ -172,10 +177,18 @@ fn select(job: &Job, state: &mut State) -> Result<Generated, Failure> {
         height: input.height as usize,
         data: input.rgb8(),
     };
-    let key = input_key(&rgb);
-    let (coverage, feature, nothing, input) = match &job.endpoint {
-        Some(endpoint) => select_remotely(endpoint, &rgb, &key, job, state)?,
-        None => select_locally(&rgb, &key, job, state)?,
+    let key = input_key(&rgb, job.action.model());
+    let (coverage, feature, nothing, input) = match (&job.action, &job.endpoint) {
+        (Action::Auto(Feature::Sky), endpoint) => select_sky(
+            &rgb,
+            &key,
+            endpoint.as_deref(),
+            job.model.as_deref(),
+            &job.cancel,
+            state,
+        )?,
+        (_, Some(endpoint)) => select_remotely(endpoint, &rgb, &key, job, state)?,
+        (_, None) => select_locally(&rgb, &key, job, state)?,
     };
     if cancelled() {
         return Err(Failure::Cancelled);
@@ -199,10 +212,48 @@ fn select(job: &Job, state: &mut State) -> Result<Generated, Failure> {
         height,
         source: BitmapSource {
             feature: feature.provenance().into(),
-            model: format!("{}@{}", SUBJECT.id, &SUBJECT.files[1].sha256[..16]),
+            model: job.action.model().provenance(),
             input,
         },
     })
+}
+
+/// The photo's sky, from the worker when one is configured, else from the local model.
+fn select_sky(
+    rgb: &RgbImage,
+    key: &str,
+    endpoint: Option<&str>,
+    model: Option<&std::path::Path>,
+    cancel: &AtomicBool,
+    state: &mut State,
+) -> Result<(Coverage, Feature, Failure, String), Failure> {
+    if state.sky.as_ref().is_none_or(|(k, _)| *k != key) {
+        state.sky = None;
+        let coverage = match endpoint {
+            Some(endpoint) => RemoteSession::new(endpoint)
+                .sky(rgb, cancel)
+                .map_err(remote_failure)?,
+            None => {
+                let Some(model) = model else {
+                    return Err(Failure::ModelMissing);
+                };
+                if state.sky_session.is_none() {
+                    state.sky_session =
+                        Some(Sky::load_with(model, &load_options()).map_err(failure)?);
+                }
+                let session = state.sky_session.as_mut().expect("loaded above");
+                session.select(rgb, cancel).map_err(failure)?
+            }
+        };
+        state.sky = Some((key.to_string(), coverage));
+    }
+    let (_, coverage) = state.sky.as_ref().expect("found above");
+    Ok((
+        coverage.clone(),
+        Feature::Sky,
+        Failure::NoSky,
+        prompt_key(key, "sky", &Prompt::default()),
+    ))
 }
 
 /// What the local models make of the photo, and the prompt on it.
@@ -226,12 +277,6 @@ fn select_locally(
     }
     let (_, analysis) = state.analysis.as_ref().expect("analysed above");
     Ok(match &job.action {
-        Action::Auto(Feature::Sky) => (
-            analysis.sky().map_err(failure)?,
-            Feature::Sky,
-            Failure::NoSky,
-            prompt_key(key, "sky", &Prompt::default()),
-        ),
         Action::Auto(feature) => (
             analysis.subject().map_err(failure)?,
             *feature,
@@ -279,15 +324,6 @@ fn select_remotely(
             .expect("analysed above"))
     };
     match &job.action {
-        Action::Auto(Feature::Sky) => {
-            let analysis = analysed(state)?;
-            Ok((
-                analysis.sky,
-                Feature::Sky,
-                Failure::NoSky,
-                prompt_key(key, "sky", &Prompt::default()),
-            ))
-        }
         Action::Auto(_) => {
             let analysis = analysed(state)?;
             Ok((
@@ -344,22 +380,22 @@ fn prompt_key(input: &str, what: &str, prompt: &Prompt) -> String {
 }
 
 fn load(model: &std::path::Path) -> Result<Session, Failure> {
+    Subject::load_with(model, &load_options()).map_err(failure)
+}
+
+fn load_options() -> LoadOptions {
     let bundled = super::models::runtime_dir();
     let runtime_library = rawmakase_inference::runtime::runtime_file_names()
         .iter()
         .map(|name| bundled.join(name))
         .find(|path| path.is_file());
-    Subject::load_with(
-        model,
-        &LoadOptions {
-            runtime_library,
-            threads: None,
-            // Selections made on this computer run on its CPU, as before; the
-            // accelerators are the remote worker's concern.
-            provider: None,
-        },
-    )
-    .map_err(failure)
+    LoadOptions {
+        runtime_library,
+        threads: None,
+        // Selections made on this computer run on its CPU, as before; the
+        // accelerators are the remote worker's concern.
+        provider: None,
+    }
 }
 
 fn failure(error: InferenceError) -> Failure {
@@ -373,16 +409,52 @@ fn failure(error: InferenceError) -> Failure {
     }
 }
 
+/// Which network a job's answer comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModelId {
+    Subject,
+    Sky,
+}
+impl Action {
+    /// Sky is the sky model's; everything else, clicks included, the subject models'.
+    pub(super) fn model(&self) -> ModelId {
+        match self {
+            Action::Auto(Feature::Sky) => ModelId::Sky,
+            _ => ModelId::Subject,
+        }
+    }
+}
+impl ModelId {
+    /// Its name, its weights' digest and the versions of its contract and processing.
+    fn identity(self) -> (&'static str, &'static str, u32, u32) {
+        match self {
+            Self::Subject => (
+                SUBJECT.id,
+                SUBJECT.files[1].sha256,
+                SUBJECT.version,
+                SUBJECT.processing_version,
+            ),
+            Self::Sky => (SKY.id, SKY.file.sha256, SKY.version, SKY.processing_version),
+        }
+    }
+    /// What a generated raster records as having made it.
+    pub(super) fn provenance(self) -> String {
+        let (id, digest, ..) = self.identity();
+        format!("{id}@{}", &digest[..16])
+    }
+}
+
 /// Identifies what the model was given: the pixels, the model and the versions of
 /// every step that shaped them. The same values execute the request.
-fn input_key(rgb: &RgbImage) -> String {
+fn input_key(rgb: &RgbImage, model: ModelId) -> String {
+    let (id, digest, version, processing) = model.identity();
     let header = [
         rgb.width.to_le_bytes().as_slice(),
         rgb.height.to_le_bytes().as_slice(),
-        SUBJECT.id.as_bytes(),
-        SUBJECT.files[1].sha256.as_bytes(),
-        &SUBJECT.version.to_le_bytes(),
-        &SUBJECT.processing_version.to_le_bytes(),
+        id.as_bytes(),
+        digest.as_bytes(),
+        &version.to_le_bytes(),
+        &processing.to_le_bytes(),
         &crate::develop::masks::SELECTION_INPUT_VERSION.to_le_bytes(),
     ]
     .concat();
@@ -461,4 +533,70 @@ fn read_endpoint() -> Option<String> {
         .map(str::trim)
         .filter(|text| !text.is_empty() && !text.chars().any(char::is_whitespace))
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pixels() -> RgbImage {
+        RgbImage {
+            width: 2,
+            height: 1,
+            data: vec![1, 2, 3, 4, 5, 6],
+        }
+    }
+
+    #[test]
+    fn sky_and_subject_answers_never_share_a_key_or_a_provenance() {
+        let rgb = pixels();
+        assert_ne!(
+            input_key(&rgb, ModelId::Sky),
+            input_key(&rgb, ModelId::Subject)
+        );
+        assert!(
+            ModelId::Sky
+                .provenance()
+                .starts_with("upernet-convnext-base@")
+        );
+        assert!(
+            ModelId::Subject
+                .provenance()
+                .starts_with("sam2.1-hiera-small@")
+        );
+    }
+
+    #[test]
+    fn only_automatic_sky_is_the_sky_models() {
+        assert_eq!(Action::Auto(Feature::Sky).model(), ModelId::Sky);
+        assert_eq!(Action::Auto(Feature::Subject).model(), ModelId::Subject);
+        assert_eq!(Action::Auto(Feature::Background).model(), ModelId::Subject);
+        assert_eq!(Action::Click(Prompt::default()).model(), ModelId::Subject);
+    }
+
+    /// The photo the same, the sky's answer is reused; another photo is asked anew. With no
+    /// model and no worker, only the cached photo's answer can come back.
+    #[test]
+    fn a_sky_found_on_a_photo_is_reused_only_for_that_photo() {
+        let rgb = pixels();
+        let key = input_key(&rgb, ModelId::Sky);
+        let found = Coverage {
+            width: 2,
+            height: 1,
+            data: vec![255, 0],
+        };
+        let mut state = State {
+            sky: Some((key.clone(), found)),
+            ..State::default()
+        };
+        let cancel = AtomicBool::new(false);
+        let (coverage, feature, ..) =
+            select_sky(&rgb, &key, None, None, &cancel, &mut state).unwrap();
+        assert_eq!((coverage.data, feature), (vec![255, 0], Feature::Sky));
+        assert!(matches!(
+            select_sky(&rgb, "another", None, None, &cancel, &mut state),
+            Err(Failure::ModelMissing)
+        ));
+        assert!(state.sky.is_none(), "the old photo's answer is let go of");
+    }
 }

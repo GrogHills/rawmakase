@@ -1,8 +1,7 @@
 //! The Masking drawer's side of Subject and Background: the two actions, what
 //! they are waiting for, and what went wrong. Everything stays in the drawer; a
 //! selection that fails or is cancelled leaves the photo as it was.
-use super::models::download_megabytes;
-use super::{Failure, Feature, Prompt, Request, Target};
+use super::{Failure, Feature, Pack, Prompt, Request, Target};
 use crate::app::Editor;
 use crate::app::design::{self, Tone, radius, space, text};
 use crate::app::retouch_tool::{control_label, hint, indented};
@@ -279,9 +278,10 @@ impl Editor {
             .as_ref()
             .and_then(|l| l.session.catalog.supports_raster_masks().ok())
             .unwrap_or(false);
-        let model = self.selection.models.installed();
+        let pack = request.feature.pack();
+        let model = self.selection.models.of(pack).installed();
         let upgrading = self.selection.upgrading.is_some();
-        let installing = self.selection.models.busy();
+        let installing = self.selection.models.of(pack).busy();
         let accent = egui::Color32::from_rgb(96, 150, 230);
         egui::Frame::new()
             .fill(egui::Color32::from_rgb(34, 44, 62))
@@ -322,8 +322,12 @@ impl Editor {
                     model,
                     upgraded && !model,
                     &format!(
-                        "Download the selection models ({} MB)",
-                        download_megabytes()
+                        "Download the {} ({} MB)",
+                        match pack {
+                            Pack::Subject => "selection models",
+                            Pack::Sky => "sky model",
+                        },
+                        pack.megabytes()
                     ),
                 );
                 ui.add_space(space::S);
@@ -338,7 +342,7 @@ impl Editor {
                         ),
                     );
                 } else if !model {
-                    self.model_step(ui, installing);
+                    self.model_step(ui, pack, installing);
                 }
                 if self.selection.remote.endpoint().is_none() && !super::worker::runtime_present() {
                     ui.add_space(space::XS);
@@ -385,15 +389,15 @@ impl Editor {
             }
         });
     }
-    fn model_step(&mut self, ui: &mut egui::Ui, installing: bool) {
-        if let Some((done, total)) = self.selection.models.progress() {
+    fn model_step(&mut self, ui: &mut egui::Ui, pack: Pack, installing: bool) {
+        if let Some((done, total)) = self.selection.models.of(pack).progress() {
             ui.add(
                 egui::ProgressBar::new(done as f32 / total.max(1) as f32)
                     .desired_width(ui.available_width())
                     .text(format!("{} of {} MB", done / 1_000_000, total / 1_000_000)),
             );
             if ui.button("Cancel download").clicked() {
-                self.selection.models.cancel();
+                self.selection.models.of_mut(pack).cancel();
             }
             return;
         }
@@ -404,7 +408,7 @@ impl Editor {
             });
             return;
         }
-        if let Some(why) = self.selection.models.failure() {
+        if let Some(why) = self.selection.models.of(pack).failure() {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(format!(
@@ -434,19 +438,28 @@ impl Editor {
             let go = egui::Button::new(egui::RichText::new("Download").strong())
                 .fill(egui::Color32::from_rgb(52, 98, 170));
             if ui.add(go).clicked() {
-                self.install_model();
+                self.install_model(pack);
             }
             if ui.button("Not now").clicked() {
                 self.selection.prompt = None;
             }
         });
     }
-    /// Remove, once the model is installed.
+    /// Remove, once a model is installed.
     fn model_footer(&mut self, ui: &mut egui::Ui) {
-        if self.selection.models.installed() && self.selection.running().is_none() {
+        if self.selection.running().is_some() {
+            return;
+        }
+        for (pack, label) in [
+            (Pack::Subject, "Remove selection model"),
+            (Pack::Sky, "Remove sky model"),
+        ] {
+            if !self.selection.models.of(pack).installed() {
+                continue;
+            }
             indented(ui, |ui| {
                 let remove = ui
-                    .small_button("Remove selection model")
+                    .small_button(label)
                     .on_hover_text(
                         "Delete the downloaded model. Saved masks keep working; selecting \
                          again asks to download it.",
@@ -454,9 +467,11 @@ impl Editor {
                     .clicked();
                 if remove {
                     let unload = self.selection.worker.unloader();
-                    self.selection
-                        .models
-                        .remove(unload, self.tx.clone(), self.context.clone());
+                    self.selection.models.of_mut(pack).remove(
+                        unload,
+                        self.tx.clone(),
+                        self.context.clone(),
+                    );
                 }
             });
         }

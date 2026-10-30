@@ -46,16 +46,18 @@ On the computer with the models (the same `models/` folder layout RAWmakase
 installs; download it there once with any RAWmakase, or copy it):
 
 ```sh
-rawmakase-remote-worker --model ~/.local/share/rawmakase/models/sam2.1-hiera-small-v1
+rawmakase-remote-worker --model ~/.local/share/rawmakase/models/sam2.1-hiera-small-v1 \
+    --sky-model ~/.local/share/rawmakase/models/upernet-convnext-base-v1
 ```
 
 The worker loads the models once, prints what it loaded — the model, the
-panoptic network and the provider the runtime **actually registered** — and
+panoptic network, the sky model and the provider the runtime **actually registered** — and
 serves until stopped. Its options:
 
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `--model DIR` | the installed models' folder (required) | — |
+| `--sky-model DIR` | the installed sky model's folder; without it, Select Sky answers with an error saying so | none |
 | `--listen ADDR` | loopback address to serve on | `127.0.0.1:8765` |
 | `--provider WHICH` | `cpu` (default), `cuda`, `coreml` | `cpu` |
 | `--threads N` | intra-op threads | CPU count, capped at 8 |
@@ -122,6 +124,9 @@ refuse each other instead of misreading.
   selection on a photo waits on the transfer, and the request budget
   (three minutes by default) bounds how slow a link can be and still work.
 - The worker keeps the analyses of the last two photos (bounded well under a
-  gigabyte) so refining clicks stay quick; everything else is recomputed.
+  gigabyte) so refining clicks stay quick; everything else is recomputed. Sky keeps
+  nothing there: the app remembers the last answer, and the photo travels again for
+  another. With `--sky-model` the worker holds that model too (about 800 MB loaded, more
+  while it runs).
 - Local inference remains the default and the reference: without the
   configuration file nothing in this page is in play.

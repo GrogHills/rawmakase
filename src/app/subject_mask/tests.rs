@@ -431,12 +431,12 @@ fn a_selection_needs_a_catalog_an_upgraded_one_and_the_model() {
         .upgrade_for_raster_masks()
         .unwrap();
     e.selection.prompt = None;
-    if e.selection.models.installed() {
+    if e.selection.models.subject.installed() {
         return; // a developer machine with the model installed
     }
     e.request_selection(SUBJECT);
     assert_eq!(e.selection.prompt, Some(Prompt::Model(SUBJECT)));
-    assert!(!e.selection.models.busy());
+    assert!(!e.selection.models.subject.busy());
     // Without a catalog nothing is offered at all.
     e.library = None;
     e.selection.prompt = None;
@@ -507,7 +507,7 @@ fn with_a_remote_worker_the_models_do_not_have_to_be_here() {
     let mut f = fixture();
     let e = &mut f.editor;
     without_remote(e);
-    if !e.selection.models.installed() {
+    if !e.selection.models.subject.installed() {
         e.request_selection(SUBJECT);
         assert_eq!(e.selection.prompt, Some(Prompt::Model(SUBJECT)));
         e.selection.prompt = None;
@@ -561,8 +561,14 @@ impl Remote {
                     Ok(Outcome {
                         key: "k".into(),
                         subject: self.subject.clone(),
-                        sky: self.sky.clone(),
                     })
+                }
+                fn sky(
+                    &mut self,
+                    _photo: &rawmakase_inference::RgbImage,
+                    _cancel: &std::sync::atomic::AtomicBool,
+                ) -> Result<rawmakase_inference::Coverage, EngineError> {
+                    Ok(self.sky.clone())
                 }
                 fn segment(
                     &mut self,
@@ -580,6 +586,7 @@ impl Remote {
                     rawmakase_remote::server::Info {
                         model: "fake@0".into(),
                         panoptic: "fake".into(),
+                        sky: "fake-sky".into(),
                         provider: "CPU".into(),
                     }
                 }
@@ -894,7 +901,7 @@ fn refining_aims_at_the_selected_component_only_with_the_models_in_place() {
     let g = begin(e, SUBJECT);
     finish(e, g, Ok(generated(130)));
     // Without the models installed, refining asks for them instead of aiming.
-    if !e.selection.models.installed() {
+    if !e.selection.models.subject.installed() {
         e.begin_refining(0, 0);
         assert!(e.selection.prompting.is_none());
         assert!(matches!(
@@ -936,38 +943,63 @@ fn refining_aims_at_the_selected_component_only_with_the_models_in_place() {
 }
 
 #[test]
-#[ignore = "needs RAWMAKASE_TEST_MODEL (the models' folder) and a HOME of its own: HOME=$(mktemp -d)"]
-fn after_installing_the_models_every_selection_runs_without_asking_again() {
+#[ignore = "needs RAWMAKASE_TEST_MODEL and RAWMAKASE_TEST_SKY_MODEL (the models' folders) and a HOME of its own: HOME=$(mktemp -d)"]
+fn each_selection_asks_for_its_own_models_once_and_then_runs() {
     let folder = std::path::PathBuf::from(std::env::var("RAWMAKASE_TEST_MODEL").unwrap());
+    let sky_folder = std::path::PathBuf::from(std::env::var("RAWMAKASE_TEST_SKY_MODEL").unwrap());
     let mut f = fixture();
     let e = &mut f.editor;
-    assert!(!e.selection.models.installed());
+    assert!(!e.selection.models.subject.installed());
     // Subject asks first; the install it offers finishes; the request goes on by itself.
     e.request_selection(SUBJECT);
     assert_eq!(e.selection.prompt, Some(Prompt::Model(SUBJECT)));
-    e.install_model_from(folder);
+    e.install_model_from(Pack::Subject, folder);
     let result = loop {
-        if let crate::app::worker::Event::ModelInstalled(r) =
+        if let crate::app::worker::Event::ModelInstalled(_, r) =
             e.rx.recv_timeout(std::time::Duration::from_secs(120))
                 .unwrap()
         {
             break r;
         }
     };
-    e.selection.models.finished(&result);
-    e.model_installed(result);
-    assert!(e.selection.models.installed());
+    e.selection.models.subject.finished(&result);
+    e.model_installed(Pack::Subject, result);
+    assert!(e.selection.models.subject.installed());
     assert!(
         e.selection.running().is_some(),
         "the request went on: {}",
         e.messages.line()
     );
     e.selection.cancel();
-    // Sky then runs at once, asking nothing.
-    e.request_selection(Request {
+    // Sky has its own model: it asks, and its waiting request goes on the same way.
+    let sky = Request {
         feature: Feature::Sky,
         target: Target::NewMask,
-    });
+    };
+    e.request_selection(sky);
+    assert_eq!(e.selection.prompt, Some(Prompt::Model(sky)));
+    assert!(e.selection.running().is_none());
+    e.install_model_from(Pack::Sky, sky_folder);
+    let (pack, result) = loop {
+        if let crate::app::worker::Event::ModelInstalled(pack, r) =
+            e.rx.recv_timeout(std::time::Duration::from_secs(120))
+                .unwrap()
+        {
+            break (pack, r);
+        }
+    };
+    assert_eq!(pack, Pack::Sky);
+    e.selection.models.sky.finished(&result);
+    e.model_installed(Pack::Sky, result);
+    assert!(e.selection.models.sky.installed());
+    assert!(e.selection.prompt.is_none(), "asked again");
+    assert!(e.selection.running().is_some());
+    e.selection.cancel();
+    // Both installed, neither asks again.
+    e.request_selection(SUBJECT);
+    assert!(e.selection.prompt.is_none(), "asked again");
+    e.selection.cancel();
+    e.request_selection(sky);
     assert!(e.selection.prompt.is_none(), "asked again");
     assert!(e.selection.running().is_some());
 }
@@ -980,7 +1012,7 @@ fn when_nothing_is_found_the_user_can_aim_by_hand() {
     finish(e, g, Err(Failure::NoSubject));
     assert!(e.selection.prompting.is_none());
     // Without the models, aiming asks for them first, as any selection does.
-    if !e.selection.models.installed() {
+    if !e.selection.models.subject.installed() {
         e.begin_aiming(SUBJECT);
         assert!(e.selection.prompting.is_none());
         assert!(matches!(
@@ -1110,4 +1142,26 @@ fn refining_a_mask_can_start_by_leaving_something_out() {
     // aiming ends and asks for the models. Either way it is not ignored.
     let taken = e.selection.running().is_some() || e.selection.prompt.is_some();
     assert!(taken, "the first leave-out click was ignored");
+}
+
+#[test]
+fn sky_asks_for_its_own_model_and_having_subjects_does_not_install_it() {
+    let mut f = fixture();
+    let e = &mut f.editor;
+    if e.selection.models.sky.installed() {
+        // The computer running the tests has it: nothing here can be observed.
+        return;
+    }
+    let sky = Request {
+        feature: Feature::Sky,
+        target: Target::NewMask,
+    };
+    assert_eq!(sky.feature.pack(), Pack::Sky);
+    assert_eq!(SUBJECT.feature.pack(), Pack::Subject);
+    e.request_selection(sky);
+    assert_eq!(e.selection.prompt, Some(Prompt::Model(sky)));
+    // Subject's install finishing does not start the sky's waiting request, nor drop it.
+    e.model_installed(Pack::Subject, Ok(()));
+    assert_eq!(e.selection.prompt, Some(Prompt::Model(sky)));
+    assert!(e.selection.running().is_none());
 }

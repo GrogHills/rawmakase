@@ -817,7 +817,17 @@ Deliberate differences from the plan above:
   rest matched the current result, and none was judged a meaningful difference for
   100–200 MB more to download and a second more per photo (ViTMatte's weights are
   also trained on Adobe's restricted Composition-1k). Not added.
-- The subject and sky choice is measured on a handful of photographs, not on the plan's
+- Sky was first the DETR sky label refined with SAM 2's outlines, and left blocky gaps
+  beside poles and heads, and took the sea for sky. It is now UperNet ConvNeXt base
+  (see [masking](masking.md) and [dependencies](dependencies.md)), its own pack and its own
+  session, loaded when first asked for. It was looked at on 256 of the owner's photographs, chosen
+  by what could break it (blown skies, water, foliage, night, no sky) and at random, with
+  no ground truth: its worse cases are in masking's limits. It runs at 1024 px, as tried
+  first: 768 px takes half the time and 1.7 GB, gets some hazy windows right and leaves
+  holes in others' bright clouds. The horizon cut the old
+  outlines needed is gone: on the new model it only removed real sky behind what stands
+  in front of it.
+- The subject choice is measured on a handful of photographs, not on the plan's
   evaluation corpus; there is no faint-result threshold and no grow/shrink/feather.
   Selections run on the CPU by default; the plan's acceleration option arrived as the
   optional [remote worker](remote-inference.md), which may register CUDA or CoreML

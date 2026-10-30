@@ -147,12 +147,12 @@ impl Editor {
                     self.auto_straighten_ready(generation, &analysed, result)
                 }
                 Event::Selection(done) => self.selection_done(*done),
-                Event::ModelInstalled(result) => {
-                    self.selection.models.finished(&result);
+                Event::ModelInstalled(pack, result) => {
+                    self.selection.models.of_mut(pack).finished(&result);
                     if result.as_ref().err().is_some_and(|e| e == "Cancelled") {
                         self.messages.note("Model download cancelled");
                     } else {
-                        self.model_installed(result);
+                        self.model_installed(pack, result);
                     }
                 }
                 Event::Lensfun {
@@ -164,8 +164,8 @@ impl Editor {
                         self.messages.say(level, said);
                     }
                 }
-                Event::ModelRemoved(result) => {
-                    self.selection.models.removed(result.is_ok());
+                Event::ModelRemoved(pack, result) => {
+                    self.selection.models.of_mut(pack).removed(result.is_ok());
                     match result {
                         Ok(()) => self.messages.done("Selection model removed"),
                         Err(e) => self.messages.fail(format!("Model not removed: {e}")),

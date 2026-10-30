@@ -43,8 +43,6 @@ pub struct RemoteAnalysis {
     pub key: String,
     /// The photo's people and animals, all zero where there are none.
     pub subject: Coverage,
-    /// The photo's sky, all zero where there is none.
-    pub sky: Coverage,
 }
 
 /// What a `ping` learned about a worker: the models it loaded and the
@@ -53,6 +51,8 @@ pub struct RemoteAnalysis {
 pub struct ServerInfo {
     pub model: String,
     pub panoptic: String,
+    /// The sky model, empty when the worker has none.
+    pub sky: String,
     pub provider: String,
 }
 
@@ -124,10 +124,12 @@ impl RemoteSession {
             Reply::Ping {
                 model,
                 panoptic,
+                sky,
                 provider,
             } => Ok(ServerInfo {
                 model,
                 panoptic,
+                sky,
                 provider,
             }),
             _ => Err(self.mismatched()),
@@ -143,15 +145,7 @@ impl RemoteSession {
         photo: &RgbImage,
         cancel: &AtomicBool,
     ) -> Result<RemoteAnalysis, ClientError> {
-        let (width, height) = (u32::try_from(photo.width), u32::try_from(photo.height));
-        let (width, height) = match (width, height) {
-            (Ok(w), Ok(h)) => (w, h),
-            _ => return Err(self.too_large()),
-        };
-        if photo.data.len() > MAX_IMAGE_BYTES {
-            return Err(self.too_large());
-        }
-        let pixels = photo.data.clone();
+        let (width, height, pixels) = self.wire_photo(photo)?;
         match self.call(
             Op::Analyze {
                 width,
@@ -160,13 +154,41 @@ impl RemoteSession {
             },
             cancel,
         )? {
-            Reply::Analyze { key, subject, sky } => Ok(RemoteAnalysis {
+            Reply::Analyze { key, subject } => Ok(RemoteAnalysis {
                 key,
                 subject: self.coverage(subject)?,
-                sky: self.coverage(sky)?,
             }),
             _ => Err(self.mismatched()),
         }
+    }
+
+    /// The photo's sky, all zero where there is none. Nothing is kept on the worker.
+    pub fn sky(&self, photo: &RgbImage, cancel: &AtomicBool) -> Result<Coverage, ClientError> {
+        let (width, height, pixels) = self.wire_photo(photo)?;
+        match self.call(
+            Op::Sky {
+                width,
+                height,
+                pixels,
+            },
+            cancel,
+        )? {
+            Reply::Sky { coverage } => self.coverage(coverage),
+            _ => Err(self.mismatched()),
+        }
+    }
+
+    /// `photo` as a request carries it, or why it cannot.
+    fn wire_photo(&self, photo: &RgbImage) -> Result<(u32, u32, Vec<u8>), ClientError> {
+        let (width, height) = (u32::try_from(photo.width), u32::try_from(photo.height));
+        let (width, height) = match (width, height) {
+            (Ok(w), Ok(h)) => (w, h),
+            _ => return Err(self.too_large()),
+        };
+        if photo.data.len() > MAX_IMAGE_BYTES {
+            return Err(self.too_large());
+        }
+        Ok((width, height, photo.data.clone()))
     }
 
     /// The mask for `prompt` on a photo analysed before.
