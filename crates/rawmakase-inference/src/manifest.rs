@@ -215,9 +215,9 @@ pub const SKY: SkySpec = SkySpec {
                   on ADE20K (Zhou et al., MIT CSAIL) by OpenMMLab; ONNX export by RAWmakase.",
 };
 
-/// Not uploaded yet: replace with the mirror's commit once the file is on it, and add it to
-/// the test below. Until then it cannot be downloaded, only imported.
-const SKY_URL: &str = "https://huggingface.co/pch/rawmakase-models/resolve/PENDING-UPLOAD/upernet-convnext-base/upernet-convnext-base-sky-fp16.onnx";
+/// The mirror's commit that added the sky model: later than [`MIRROR`], whose files stay
+/// pinned where they are.
+const SKY_URL: &str = "https://huggingface.co/pch/rawmakase-models/resolve/b727de8d854f7d5c50396323abe1a3b12e743954/upernet-convnext-base/upernet-convnext-base-sky-fp16.onnx";
 
 /// Every file Subject and Background need, in one folder.
 pub fn all_files() -> Vec<ModelFile> {
@@ -267,5 +267,10 @@ mod tests {
         // Sky is apart: nobody who has Subject's models has to fetch it.
         assert!(!all_files().iter().any(|f| f.name == SKY.file.name));
         assert_eq!(SKY.file.sha256.len(), 64);
+        let commit = SKY_URL
+            .strip_prefix("https://huggingface.co/pch/rawmakase-models/resolve/")
+            .and_then(|rest| rest.split('/').next())
+            .unwrap();
+        assert!(commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 }
