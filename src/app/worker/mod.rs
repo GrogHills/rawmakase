@@ -68,8 +68,8 @@ pub(crate) enum Event {
     /// A Subject or Background selection finished (or failed).
     Selection(Box<crate::app::subject_mask::Done>),
     /// The selection model finished installing, or why not.
-    ModelInstalled(Result<(), String>),
-    ModelRemoved(Result<(), String>),
+    ModelInstalled(crate::app::subject_mask::Pack, Result<(), String>),
+    ModelRemoved(crate::app::subject_mask::Pack, Result<(), String>),
     /// A Lensfun database job finished (`app::lensfun`).
     Lensfun {
         generation: u64,

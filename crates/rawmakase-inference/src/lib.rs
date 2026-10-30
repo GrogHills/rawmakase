@@ -1,4 +1,4 @@
-//! Local ONNX inference for interactive subject selection (Segment Anything 2).
+//! Local ONNX inference for Subject, Background and Sky selection.
 //!
 //! This crate owns the pinned model contract ([`manifest`]), the pure image
 //! to tensor and matte to coverage mappings ([`process`]) and the lazily loaded
@@ -18,8 +18,9 @@ pub mod process;
 pub mod refine;
 pub mod runtime;
 
-pub use auto::Proposal;
 pub use error::InferenceError;
-pub use manifest::{ModelFile, ModelSpec, PANOPTIC, PanopticSpec, SUBJECT};
+pub use manifest::{ModelFile, ModelSpec, PANOPTIC, PanopticSpec, SKY, SUBJECT, SkySpec};
 pub use process::{Coverage, Point, Prompt, RgbImage};
-pub use runtime::{Analysis, Embedding, LoadOptions, Provider, RUNTIME_ENV, Session, Subject};
+pub use runtime::{
+    Analysis, Embedding, LoadOptions, Provider, RUNTIME_ENV, Session, Sky, SkySession, Subject,
+};

@@ -15,7 +15,7 @@ colour management (`raw`, `demosaic`, `photo`,
 and the full-size decode in `decode` and `decode_cache`, which uses the engine's
 highlight recovery); `crates/rawmakase-export` develops and writes exports with
 their watermarks over both; `crates/rawmakase-inference` is the one leaf that runs
-the subject selection model through a lazily loaded ONNX Runtime (pixels in,
+the selection models through a lazily loaded ONNX Runtime (pixels in,
 coverage out; it knows no other workspace crate, and no value, catalog or
 rendering crate can reach it, so saved masks render without any inference);
 `crates/rawmakase-remote` sits directly on inference alone — the optional

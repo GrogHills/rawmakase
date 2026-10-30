@@ -20,9 +20,9 @@ use ort::session::builder::GraphOptimizationLevel;
 use ort::session::{RunOptions, Session as OrtSession};
 use ort::value::TensorRef;
 
-use crate::auto::{self, Proposal, SIDE};
+use crate::auto::{self, SIDE};
 use crate::error::InferenceError;
-use crate::manifest::{ModelSpec, PANOPTIC, SUBJECT, all_files};
+use crate::manifest::{ModelFile, ModelSpec, PANOPTIC, SKY, SUBJECT, all_files, sky_files};
 use crate::panoptic::{self, Labels};
 use crate::process::{self, Coverage, Prompt, RgbImage};
 
@@ -148,7 +148,7 @@ impl Subject {
     pub fn load_with(dir: &Path, options: &LoadOptions) -> Result<Session, InferenceError> {
         let environment = load_runtime(options.runtime_library.as_deref())?;
         let spec = SUBJECT;
-        check_files(dir)?;
+        check_files(dir, &all_files())?;
         let threads = options.threads.unwrap_or_else(default_threads).max(1);
         let provider = options.provider.unwrap_or_default();
         // The runtime API panics on internal misuse; a panic must never reach
@@ -192,6 +192,87 @@ impl Subject {
     }
 }
 
+/// Namespace for loading the sky model.
+pub struct Sky;
+
+impl Sky {
+    /// Opens the runtime as [`Subject::load_with`] does and the sky model in folder `dir`.
+    pub fn load_with(dir: &Path, options: &LoadOptions) -> Result<SkySession, InferenceError> {
+        let environment = load_runtime(options.runtime_library.as_deref())?;
+        check_files(dir, &sky_files())?;
+        let threads = options.threads.unwrap_or_else(default_threads).max(1);
+        let provider = options.provider.unwrap_or_default();
+        let network = catch_unwind(AssertUnwindSafe(|| {
+            build_session(
+                &environment,
+                &dir.join(SKY.file.name),
+                threads,
+                GraphOptimizationLevel::All,
+                provider,
+            )
+        }))
+        .map_err(|_| {
+            InferenceError::Failed("ONNX Runtime panicked while loading the model".into())
+        })??;
+        Ok(SkySession { network, provider })
+    }
+}
+
+/// The loaded sky model. One run at a time; dropping it releases the model's memory.
+pub struct SkySession {
+    network: OrtSession,
+    provider: Provider,
+}
+
+impl SkySession {
+    /// The provider the runtime accepted, as [`Session::provider`].
+    pub fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    /// The photo's sky as coverage in its frame, all zero when there is none. A few
+    /// seconds; cancellable.
+    pub fn select(
+        &mut self,
+        image: &RgbImage,
+        cancel: &AtomicBool,
+    ) -> Result<Coverage, InferenceError> {
+        cancelled(cancel)?;
+        process::check_image(image)?;
+        let (width, height) = sky_input_size(image.width, image.height);
+        let tensor = process::preprocess_sized(image, width, height, SKY.mean, SKY.std)?;
+        cancelled(cancel)?;
+        let network = &mut self.network;
+        let probability = guarded(cancel, |options| {
+            let input = TensorRef::from_array_view(([1usize, 3, height, width], &tensor[..]))
+                .map_err(failed)?;
+            let outputs = network
+                .run_with_options(ort::inputs!["pixel_values" => input], options)
+                .map_err(failed)?;
+            let output = outputs.get("sky").ok_or_else(|| {
+                InferenceError::ModelInvalid("the sky model has no output `sky`".into())
+            })?;
+            let (shape, data) = output.try_extract_tensor::<f32>().map_err(failed)?;
+            let expected = [1, height as i64, width as i64];
+            if **shape != expected {
+                return Err(InferenceError::OutputInvalid(format!(
+                    "the sky model answered with shape {shape:?}, expected {expected:?}"
+                )));
+            }
+            Ok(data.to_vec())
+        })?;
+        auto::sky(image, &probability, width, height)
+    }
+}
+
+/// What the sky model is fed for a photo of `width` x `height`: scaled to the long edge,
+/// its proportions kept, unless that would leave a side too short for the network.
+fn sky_input_size(width: usize, height: usize) -> (usize, usize) {
+    let scale = SKY.long_edge as f64 / width.max(height) as f64;
+    let side = |v: usize| ((v as f64 * scale).round() as usize).max(SKY.min_side);
+    (side(width), side(height))
+}
+
 /// What the image encoder made of one photo: reused for every click on it. The
 /// photo itself is kept for the edge refinement of each result.
 pub struct Embedding {
@@ -219,16 +300,13 @@ pub struct Session {
     provider: Provider,
 }
 
-/// What the models made of one photo: reused for every selection on it. Subject and Sky
-/// are chosen from it without running a model again; clicks need the embedding.
+/// What the models made of one photo: reused for every selection on it. Subject is chosen
+/// from it without running a model again; clicks need the embedding.
 pub struct Analysis {
     embedding: Embedding,
     /// What SAM 2 drew for each person and animal DETR found, together (0..=1, on the
     /// [`SIDE`] grid).
     subject_mask: Vec<f32>,
-    sky_label: Vec<f32>,
-    /// The outlines SAM 2 drew at points of the sky label.
-    sky_outlines: Vec<Proposal>,
 }
 impl Analysis {
     /// The photo's people and animals as coverage in its frame, all zero when there are
@@ -236,23 +314,13 @@ impl Analysis {
     pub fn subject(&self) -> Result<Coverage, InferenceError> {
         auto::subject(&self.embedding.image, &self.subject_mask)
     }
-    /// The photo's sky, all zero when there is none.
-    pub fn sky(&self) -> Result<Coverage, InferenceError> {
-        auto::sky(&self.embedding.image, &self.sky_outlines, &self.sky_label)
-    }
     /// The embedding, for [`Session::segment`].
     pub fn embedding(&self) -> &Embedding {
         &self.embedding
     }
     /// Bytes held.
     pub fn bytes(&self) -> usize {
-        self.embedding.bytes()
-            + (self.subject_mask.len() + self.sky_label.len()) * 4
-            + self
-                .sky_outlines
-                .iter()
-                .map(|p| p.mask.len())
-                .sum::<usize>()
+        self.embedding.bytes() + self.subject_mask.len() * 4
     }
 }
 
@@ -319,9 +387,8 @@ impl Session {
         Ok(coverage)
     }
 
-    /// Everything automatic selection needs of a photo: the embedding, where DETR finds
-    /// its people, animals and sky, and SAM 2's outline of each person and animal and of
-    /// the sky. About two seconds; cancellable.
+    /// Everything Subject needs of a photo: the embedding, where DETR finds its people and
+    /// animals, and SAM 2's outline of each. About two seconds; cancellable.
     pub fn analyze(
         &mut self,
         image: &RgbImage,
@@ -344,16 +411,13 @@ impl Session {
         let (embedding, labels) = (embedding?, labels?);
         let side = self.spec.mask_size;
         debug_assert_eq!(side, SIDE);
-        let candidates = |decoded: &Decoded| -> Vec<(Vec<bool>, f32)> {
+        let candidates = |decoded: &Decoded| -> Vec<Vec<bool>> {
             (0..3)
                 .map(|k| {
-                    (
-                        decoded.logits[k * side * side..(k + 1) * side * side]
-                            .iter()
-                            .map(|l| *l > 0.0)
-                            .collect(),
-                        decoded.scores[k],
-                    )
+                    decoded.logits[k * side * side..(k + 1) * side * side]
+                        .iter()
+                        .map(|l| *l > 0.0)
+                        .collect()
                 })
                 .collect()
         };
@@ -374,7 +438,7 @@ impl Session {
             let best = candidates(&decoded)
                 .into_iter()
                 .enumerate()
-                .map(|(c, (mask, _))| (auto::iou(&mask, &detr), c))
+                .map(|(c, mask)| (auto::iou(&mask, &detr), c))
                 .max_by(|a, b| a.0.total_cmp(&b.0));
             let drawn = match best {
                 Some((agreement, c)) if agreement >= 0.5 && decoded.object >= 0.0 => decoded.logits
@@ -388,31 +452,9 @@ impl Session {
                 *m = m.max(*d);
             }
         }
-        // The sky: SAM 2's outlines at points of the label.
-        let mut found: Vec<Proposal> = Vec::new();
-        for point in auto::sky_points(&labels.sky) {
-            let decoded = self.decode(
-                &embedding,
-                &Prompt {
-                    points: vec![point],
-                    bounds: None,
-                },
-                cancel,
-            )?;
-            if decoded.object < 0.0 {
-                continue;
-            }
-            for (mask, score) in candidates(&decoded) {
-                if score > 0.6 {
-                    found.push(Proposal { mask, score });
-                }
-            }
-        }
         Ok(Analysis {
             embedding,
             subject_mask,
-            sky_label: labels.sky,
-            sky_outlines: distinct(found),
         })
     }
 
@@ -487,33 +529,6 @@ impl Decoded {
     }
 }
 
-/// The proposals, best first, without near-duplicates.
-fn distinct(mut found: Vec<Proposal>) -> Vec<Proposal> {
-    found.sort_by(|a, b| b.score.total_cmp(&a.score));
-    let mut kept: Vec<Proposal> = Vec::new();
-    for p in found {
-        let overlaps = |q: &Proposal| {
-            let both = p
-                .mask
-                .iter()
-                .zip(&q.mask)
-                .filter(|(a, b)| **a && **b)
-                .count();
-            let either = p
-                .mask
-                .iter()
-                .zip(&q.mask)
-                .filter(|(a, b)| **a || **b)
-                .count();
-            either > 0 && both as f32 / either as f32 > 0.85
-        };
-        if !kept.iter().any(overlaps) {
-            kept.push(p);
-        }
-    }
-    kept
-}
-
 fn embed_with(
     encoder: &mut OrtSession,
     spec: &ModelSpec,
@@ -572,7 +587,7 @@ fn embed_with(
     })
 }
 
-/// Where the photo's people, animals and sky are, on the [`SIDE`] grid.
+/// Where the photo's people and animals are, on the [`SIDE`] grid.
 fn panoptic_with(
     network: &mut OrtSession,
     image: &RgbImage,
@@ -677,8 +692,8 @@ fn failed(error: impl std::fmt::Display) -> InferenceError {
     InferenceError::Failed(error.to_string())
 }
 
-fn check_files(dir: &Path) -> Result<(), InferenceError> {
-    for file in all_files() {
+fn check_files(dir: &Path, files: &[ModelFile]) -> Result<(), InferenceError> {
+    for file in files {
         let path = dir.join(file.name);
         let meta = std::fs::metadata(&path).map_err(|e| {
             InferenceError::ModelInvalid(format!("cannot read {}: {e}", path.display()))
@@ -830,15 +845,42 @@ mod tests {
             std::env::temp_dir().join(format!("rawmakase-inference-size-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(matches!(
-            check_files(&dir),
+            check_files(&dir, &all_files()),
             Err(InferenceError::ModelInvalid(_))
         ));
         for file in all_files() {
             std::fs::write(dir.join(file.name), b"short").unwrap();
         }
-        let err = check_files(&dir).unwrap_err();
+        let err = check_files(&dir, &all_files()).unwrap_err();
         std::fs::remove_dir_all(&dir).ok();
         assert!(matches!(err, InferenceError::ModelInvalid(_)));
+    }
+
+    #[test]
+    fn the_sky_model_is_fed_the_long_edge_and_never_too_narrow_a_side() {
+        assert_eq!(sky_input_size(1280, 853), (1024, 682));
+        assert_eq!(sky_input_size(853, 1280), (682, 1024));
+        assert_eq!(sky_input_size(300, 200), (1024, 683));
+        assert_eq!(sky_input_size(1280, 20), (1024, 64));
+    }
+
+    #[test]
+    fn subject_needs_nothing_of_the_sky_model_and_sky_nothing_of_subjects() {
+        let dir =
+            std::env::temp_dir().join(format!("rawmakase-inference-sky-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(check_files(&dir, &sky_files()).is_err());
+        for file in sky_files() {
+            std::fs::File::create(dir.join(file.name))
+                .unwrap()
+                .set_len(file.size_bytes)
+                .unwrap();
+        }
+        let sky = check_files(&dir, &sky_files());
+        let subject = check_files(&dir, &all_files());
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(sky.is_ok());
+        assert!(subject.is_err());
     }
 
     #[test]
