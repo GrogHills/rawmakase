@@ -103,6 +103,22 @@ pub fn with_look(base: &CameraProfile, look: &FittedLook) -> Result<CameraProfil
     Ok(p)
 }
 
+/// `base` with its neutrals tinted by `gains` on linear ProPhoto: a look's table can't
+/// move grey, which has no hue, so a camera's grey is the base's to match.
+pub fn with_grey_gains(base: &CameraProfile, gains: [f32; 3]) -> CameraProfile {
+    use crate::color::{inverse, mul_matrix};
+    let diag: Matrix =
+        std::array::from_fn(|i| std::array::from_fn(|j| if i == j { gains[i] } else { 0. }));
+    let tint = mul_matrix(
+        inverse(super::XYZ_TO_PRO),
+        mul_matrix(diag, super::XYZ_TO_PRO),
+    );
+    let mut p = base.clone();
+    p.forward1 = mul_matrix(tint, p.forward1);
+    p.forward2 = mul_matrix(tint, p.forward2);
+    p
+}
+
 /// RAWmakase Standard as a fitted look's base: from the camera's colour matrix
 /// (the camera table's or the DNG's own ColorMatrix), never from a DNG's embedded
 /// profile; `None` without a usable matrix.
@@ -337,6 +353,17 @@ mod tests {
         .unwrap();
         assert_eq!(title(&long), None);
         assert_eq!(long.enhanced.as_ref().unwrap().camera_look, None);
+    }
+
+    #[test]
+    fn grey_gains_tint_what_the_base_makes_of_camera_neutral() {
+        let base = standard_base(&camera()).expect("a matrix");
+        let m = base.camera_matrix(6504.);
+        let tinted = with_grey_gains(&base, [1., 0.98, 1.]).camera_matrix(6504.);
+        let grey = |m: Matrix| crate::color::mul(m, [1., 1., 1.]);
+        let (a, b) = (grey(m), grey(tinted));
+        assert!((b[0] / a[0] - 1.).abs() < 1e-3 && (b[2] / a[2] - 1.).abs() < 1e-3);
+        assert!((b[1] / a[1] - 0.98).abs() < 1e-3);
     }
 
     #[test]

@@ -40,7 +40,7 @@ type Rgb = [f32; 3];
 
 /// The fit's version: part of a fit cache's key, raised whenever what a fit makes
 /// of a photo changes.
-pub const FIT_VERSION: u32 = 4;
+pub const FIT_VERSION: u32 = 6;
 /// The proxy's long edge, and how much larger its renders are.
 const PROXY_EDGE: u32 = 192;
 const RENDER_FACTOR: u32 = 4;
@@ -105,6 +105,8 @@ pub struct Report {
     pub kind: Option<Kind>,
     pub refusal: Option<String>,
     pub seconds: f32,
+    /// What the base's grey was tinted by to match the camera's.
+    pub grey_gains: Option<[f32; 3]>,
 }
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct Direct {
@@ -409,19 +411,26 @@ fn fit_pairs(
             (base, true)
         }
     };
-    let scene_render = stage(
-        im,
-        &pairing_recipe(m, Some(base.clone())),
-        Stage::SceneOutput,
-        cancel,
-    )?;
-    let (sw, sh, scene) = pairs::reduce(
-        &scene_render.pixels,
-        scene_render.width,
-        scene_render.height,
-    );
-    if [sw, sh] != [w, h] {
-        return Err(refuse("The photo's stages differ in size"));
+    let scene_of = |base: &CameraProfile| -> Result<Vec<Rgb>, Refusal> {
+        let rendered = stage(
+            im,
+            &pairing_recipe(m, Some(base.clone())),
+            Stage::SceneOutput,
+            cancel,
+        )?;
+        let (sw, sh, scene) = pairs::reduce(&rendered.pixels, rendered.width, rendered.height);
+        if [sw, sh] != [w, h] {
+            return Err(refuse("The photo's stages differ in size"));
+        }
+        Ok(scene)
+    };
+    let mut scene = scene_of(&base)?;
+    // The camera's grey, which a look's table can't move, is the base's to match.
+    let mut base = base;
+    if let Some(gains) = solve::grey_gains(&pick(&scene, &fitting), &fit_target) {
+        base = fitted::with_grey_gains(&base, gains);
+        scene = scene_of(&base)?;
+        report.grey_gains = Some(gains);
     }
     // Renders judge a look at the proxy's size: a small copy serves, at a fraction of
     // the half-size photo's cost.

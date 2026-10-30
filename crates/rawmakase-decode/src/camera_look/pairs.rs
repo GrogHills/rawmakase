@@ -4,6 +4,7 @@
 use super::{PROXY_EDGE, RENDER_FACTOR, Refusal, Rgb, refuse};
 use crate::raster::PreviewSpace;
 use rawmakase_interop::exif::ColourFacts;
+use rawmakase_model::color::srgb_encode;
 use rayon::prelude::*;
 use serde::Serialize;
 use std::sync::atomic::AtomicBool;
@@ -562,9 +563,13 @@ pub(super) fn luminance(p: Rgb) -> f32 {
     0.288_04 * p[0] + 0.711_874 * p[1] + 0.000_086 * p[2]
 }
 
+/// A strong edge: this step of encoded luminance across 3 × 3 pixels. A ratio would
+/// refuse the shadows' small steps, and with them the curve's blacks.
+const EDGE_STEP: f32 = 0.3;
+
 /// Which pixels a fit may learn from: inside the photo, unclipped by the sensor and
-/// in the preview, not on a strong edge (3 × 3 luminance ratio above 3), not in the
-/// corners vignetting darkens (beyond 0.85 of the half-diagonal).
+/// in the preview, not on a strong edge ([`EDGE_STEP`]), not in the corners vignetting
+/// darkens (beyond 0.85 of the half-diagonal).
 pub(super) fn usable(proxy: &Proxy, sampled: &Sampled) -> Vec<bool> {
     let (w, h) = (proxy.width as i32, proxy.height as i32);
     let lum: Vec<f32> = sampled.pro.iter().map(|p| luminance(*p)).collect();
@@ -598,7 +603,7 @@ pub(super) fn usable(proxy: &Proxy, sampled: &Sampled) -> Vec<bool> {
                     hi = hi.max(v);
                 }
             }
-            hi <= 3. * lo.max(1e-4)
+            srgb_encode(hi.clamp(0., 1.)) - srgb_encode(lo.clamp(0., 1.)) <= EDGE_STEP
         })
         .collect()
 }
@@ -804,6 +809,18 @@ mod tests {
         assert!(!at(3, 8), "sensor clipped");
         assert!(!at(11, 8) && !at(12, 8), "the edge");
         assert!(!at(0, 0) && !at(23, 15), "the corners");
+    }
+
+    /// Dark plaid: a threefold step, but a small one to the eye, and the only say the
+    /// curve's blacks get.
+    #[test]
+    fn the_small_steps_of_shadows_are_learned_from() {
+        let p = preview(96, 64, |x, _| if x < 48 { 0.005 } else { 0.02 });
+        let proxy = proxy_of(&p, 24, 16, 1., [0., 0.]);
+        let integral = Integral::new(&p);
+        let s = sample(&p, &integral, [24, 16], 1., [0., 0.], [0., 0.]);
+        let u = usable(&proxy, &s);
+        assert!(u[8 * 24 + 11] && u[8 * 24 + 12]);
     }
 
     #[test]

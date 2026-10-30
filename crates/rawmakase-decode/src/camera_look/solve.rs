@@ -157,9 +157,13 @@ pub(super) fn luminance_curve(scene: &[Rgb], target: &[Rgb]) -> Vec<f32> {
     ))
 }
 
+/// The widest bin of the refitted curve (encoded), and the least weight it closes with.
+const BIN_WIDTH: f32 = 0.06;
+const BIN_LEAST: f64 = 8.;
+
 /// The curve again for the table `look` has: the encoded extrema the look's curve
-/// receives against the preview's, binned into 32 equal-weight bins, made
-/// monotone (pool adjacent violators).
+/// receives against the preview's, binned into 32 equal-weight bins, narrower where
+/// [`BIN_WIDTH`] says, made monotone (pool adjacent violators).
 fn refit_curve(base: &CameraProfile, look: &FittedLook, scene: &[Rgb], target: &[Rgb]) -> Vec<f32> {
     let profile = fitted::with_look(base, look).expect("a valid look");
     let mut points: Vec<(f32, f32, f32)> = Vec::with_capacity(scene.len() * 2);
@@ -177,7 +181,11 @@ fn refit_curve(base: &CameraProfile, look: &FittedLook, scene: &[Rgb], target: &
     let mut bins: Vec<[f64; 3]> = Vec::new();
     let (mut acc, mut next) = ([0f64; 3], total / 32.);
     let mut seen = 0f32;
+    let mut first = 0f32;
     for (u, y, w) in points {
+        if acc[2] == 0. {
+            first = u;
+        }
         let w64 = f64::from(w);
         acc = [
             acc[0] + w64 * f64::from(u),
@@ -185,10 +193,11 @@ fn refit_curve(base: &CameraProfile, look: &FittedLook, scene: &[Rgb], target: &
             acc[2] + w64,
         ];
         seen += w;
-        if seen >= next {
+        // A bin spans a limited range too: few pixels in the shadows must still set them.
+        if seen >= next || (u - first > BIN_WIDTH && acc[2] >= BIN_LEAST) {
             bins.push(acc);
             acc = [0.; 3];
-            next += total / 32.;
+            next = seen + total / 32.;
         }
     }
     if acc[2] > 0. {
@@ -223,9 +232,10 @@ fn refit_curve(base: &CameraProfile, look: &FittedLook, scene: &[Rgb], target: &
         .collect()
 }
 
-/// The table's kernels, in node units: hue 2.5° (nodes 5° apart), saturation 0.15
-/// and encoded value 0.12 (nodes 1/7 apart); and the shrinkage towards no change.
-const SIGMA: [f32; 3] = [0.5, 0.15 * 7., 0.12 * 7.];
+/// The table's kernels, in node units: hue 2.5° (nodes 5° apart), saturation 0.6 of a
+/// node (narrow enough that lips and the skin beside them differ) and encoded value
+/// 0.12 (nodes 1/7 apart); and the shrinkage towards no change.
+const SIGMA: [f32; 3] = [0.5, 0.6, 0.12 * 7.];
 const SHRINK: f64 = 5.;
 /// The most a node may shift hue (degrees), and scale saturation and value (as a
 /// natural logarithm).
@@ -307,7 +317,7 @@ fn refine_table(base: &CameraProfile, look: &mut FittedLook, scene: &[Rgb], targ
             std::array::from_fn(|c| (now[c] + step[c] as f32).clamp(-LIMITS[c], LIMITS[c]));
         *entry = [next[0], next[1].exp(), next[2].exp()];
     }
-    smooth_table(&mut look.table);
+    smooth_table(&mut look.table, &weights);
 }
 /// How much a node may differ from its neighbour along hue, saturation and value, for
 /// the hue shift (degrees) and the logarithms of the saturation and value scales.
@@ -316,14 +326,49 @@ fn refine_table(base: &CameraProfile, look: &mut FittedLook, scene: &[Rgb], targ
 /// Hue along hue is the loosest, short of reversing: a camera draws skin's hues together,
 /// and a table that can't leaves a face blotchy and off in hue.
 const SLOPES: [[f32; 3]; 3] = [[4.5, 5., 5.], [0.08, 0.12, 0.12], [0.04, 0.12, 0.12]];
+/// The nodes out from the neutral column that are smoothed, how many times, and how far
+/// each goes towards the mean of its neighbours along saturation, hue and value (their
+/// sum below 1, so that a zigzag only ever shrinks).
+const NEAR_GREY_NODES: usize = 3;
+const NEAR_GREY_PASSES: usize = 4;
+const NEAR_GREY_PULL: [f32; 3] = [0.35, 0.35, 0.2];
+/// Node weight at which that pull is halved: colours the photo has plenty of keep what
+/// they were fitted to.
+const NEAR_GREY_WEIGHT: f32 = 100.;
 
 /// The closest table, in sweeps along each axis, whose neighbouring nodes respect
-/// [`SLOPES`]; the neutral column stays as it is.
-fn smooth_table(table: &mut [[f32; 3]]) {
+/// [`SLOPES`], thinly learned nodes near grey smoothed first (`weights` as
+/// [`refine_table`] gathers them); the neutral column stays as it is.
+fn smooth_table(table: &mut [[f32; 3]], weights: &[[f64; 2]]) {
     let [nh, ns, nv] = TABLE_DIMS;
     let index = |h: usize, s: usize, v: usize| (v * nh + h) * ns + s;
     let log = |e: [f32; 3]| [e[0], e[1].ln(), e[2].ln()];
     let mut logged: Vec<[f32; 3]> = table.iter().map(|e| log(*e)).collect();
+    // Near grey a node with little weight is learned from few pixels, of soft edges, and
+    // neighbouring ones disagree within the slopes: a smooth edge shows the zigzag as bands.
+    for _ in 0..NEAR_GREY_PASSES {
+        let old = logged.clone();
+        for v in 0..nv {
+            for h in 0..nh {
+                for s in 1..=NEAR_GREY_NODES {
+                    let at = |h: usize, s: usize, v: usize| old[index(h, s, v)];
+                    let x = at(h, s, v);
+                    let (sp, sn) = (at(h, s - 1, v), at(h, s + 1, v));
+                    let (hp, hn) = (at((h + nh - 1) % nh, s, v), at((h + 1) % nh, s, v));
+                    let (vp, vn) = (at(h, s, v.saturating_sub(1)), at(h, s, (v + 1).min(nv - 1)));
+                    let thin =
+                        NEAR_GREY_WEIGHT / (NEAR_GREY_WEIGHT + weights[index(h, s, v)][1] as f32);
+                    let [ws, wh, wv] = NEAR_GREY_PULL.map(|w| w * thin);
+                    for c in 0..3 {
+                        logged[index(h, s, v)][c] = x[c]
+                            + ws * ((sp[c] + sn[c]) / 2. - x[c])
+                            + wh * ((hp[c] + hn[c]) / 2. - x[c])
+                            + wv * ((vp[c] + vn[c]) / 2. - x[c]);
+                    }
+                }
+            }
+        }
+    }
     let limit = |to: &mut f32, from: f32, slope: f32| *to = to.clamp(from - slope, from + slope);
     for _ in 0..2 {
         for c in 0..3 {
@@ -374,6 +419,40 @@ fn smooth_table(table: &mut [[f32; 3]]) {
 }
 fn gauss(d: f32, sigma: f32) -> f32 {
     (-0.5 * (d / sigma).powi(2)).exp()
+}
+
+/// Most and least a channel of grey is moved, and the fewest grey pairs to judge by.
+const GREY_MOST: f32 = 0.05;
+const GREY_LEAST: f32 = 0.002;
+const GREY_PAIRS: usize = 64;
+
+/// The gains (geometric mean 1) on linear ProPhoto that take the greys of `scene` to
+/// those of `target`, where both are near neutral and neither dark nor bright; `None`
+/// with too few of them or no difference worth a change.
+pub(super) fn grey_gains(scene: &[Rgb], target: &[Rgb]) -> Option<[f32; 3]> {
+    let tint = |p: &Rgb| {
+        let max = p.iter().copied().fold(f32::MIN, f32::max);
+        let min = p.iter().copied().fold(f32::MAX, f32::min);
+        let mean = (p[0] + p[1] + p[2]) / 3.;
+        (min > 0. && (max - min) / max < 0.08 && (0.05..0.9).contains(&mean))
+            .then(|| p.map(|v| (v / mean).ln()))
+    };
+    let (mut sum, mut n) = ([0f64; 3], 0usize);
+    for (s, t) in scene.iter().zip(target) {
+        if let (Some(s), Some(t)) = (tint(s), tint(t)) {
+            (0..3).for_each(|c| sum[c] += f64::from(t[c] - s[c]));
+            n += 1;
+        }
+    }
+    if n < GREY_PAIRS {
+        return None;
+    }
+    let mean = sum.map(|v| (v / n as f64) as f32);
+    let centre = (mean[0] + mean[1] + mean[2]) / 3.;
+    let log = mean.map(|v| v - centre);
+    log.iter()
+        .any(|v| v.abs() >= GREY_LEAST)
+        .then(|| log.map(|v| v.clamp(-GREY_MOST, GREY_MOST).exp()))
 }
 
 /// The look over `base` taking `scene` (linear ProPhoto leaving the scene tone
@@ -609,6 +688,83 @@ impl Lattice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A few dark pixels among many bright ones: equal-weight bins alone would draw one
+    /// line from black to the bright tones and lift the blacks.
+    #[test]
+    fn a_few_dark_pixels_still_set_the_blacks() {
+        let base = base();
+        let look = FittedLook::identity();
+        let dark = (0..40).map(|i| 0.004 + i as f32 / 40. * 0.004);
+        let bright = (0..4000).map(|i| 0.3 + i as f32 / 4000. * 0.3);
+        let scene: Vec<Rgb> = dark.chain(bright).map(|v| [v; 3]).collect();
+        let profile = fitted::with_look(&base, &look).unwrap();
+        // A camera deeper in its blacks than the profile, and the same elsewhere.
+        let target: Vec<Rgb> = scene
+            .iter()
+            .map(|s| {
+                let made = rawmakase_model::color::mul(
+                    rawmakase_model::camera_profiles::RGB_TO_PRO,
+                    profile.finish(*s),
+                );
+                if s[0] < 0.1 {
+                    made.map(|v| v * 0.5)
+                } else {
+                    made
+                }
+            })
+            .collect();
+        let curve = refit_curve(&base, &look, &scene, &target);
+        let toned = |s: Rgb| {
+            let a = fitted::table_output(&profile, s);
+            srgb_encode(default_tone_at(a[0]))
+        };
+        let x = toned(scene[20]);
+        let wanted = srgb_encode(target[20][0]);
+        assert!(
+            (at(&curve, x) - wanted).abs() < 0.02,
+            "{} {wanted}",
+            at(&curve, x)
+        );
+    }
+
+    /// The bands around a soft edge: a zigzag near grey goes where nothing was learned, and
+    /// stays where plenty was.
+    #[test]
+    fn only_thinly_learned_colours_near_grey_are_smoothed() {
+        let [nh, ns, nv] = TABLE_DIMS;
+        let index = |h: usize, s: usize, v: usize| (v * nh + h) * ns + s;
+        let zigzag = |h: usize| if h.is_multiple_of(2) { 1.03 } else { 1. / 1.03 };
+        let mut table = vec![[0., 1., 1.]; nh * ns * nv];
+        for h in 0..nh {
+            table[index(h, 2, 4)][2] = zigzag(h);
+        }
+        let spread = |t: &[[f32; 3]]| (t[index(10, 2, 4)][2] / t[index(11, 2, 4)][2]).ln().abs();
+        let before = spread(&table);
+        let mut thin = table.clone();
+        smooth_table(&mut thin, &vec![[0.; 2]; table.len()]);
+        assert!(spread(&thin) < 0.25 * before, "{} {before}", spread(&thin));
+        let mut learned = table.clone();
+        smooth_table(&mut learned, &vec![[1e6; 2]; table.len()]);
+        assert!(
+            spread(&learned) > 0.95 * before.min(SLOPES[2][0]),
+            "{}",
+            spread(&learned)
+        );
+    }
+
+    #[test]
+    fn a_grey_cast_is_measured_on_greys_alone() {
+        let scene: Vec<Rgb> = (0..200).map(|i| [0.4 + i as f32 / 1000.; 3]).collect();
+        let target: Vec<Rgb> = scene.iter().map(|p| [p[0], p[1] * 1.02, p[2]]).collect();
+        let g = grey_gains(&scene, &target).expect("a cast");
+        assert!(g[1] / g[0] > 1.019 && g[1] / g[0] < 1.021, "{g:?}");
+        assert_eq!(grey_gains(&scene, &scene), None, "none to correct");
+        assert_eq!(grey_gains(&scene[..10], &target[..10]), None, "too few");
+        // Colours say nothing about grey.
+        let red: Vec<Rgb> = vec![[0.6, 0.2, 0.1]; 200];
+        assert_eq!(grey_gains(&red, &target), None);
+    }
     use rawmakase_model::camera_data::Metadata;
 
     fn base() -> CameraProfile {
