@@ -76,7 +76,7 @@ fn decode(mut file: HeicFile) -> Result<hevc::Picture> {
         let pictures: Vec<_> = chunk
             .par_iter()
             .zip(&data)
-            .map(|((_, config, _), data)| hevc::decode(config, data))
+            .map(|((_, config, _), data)| hevc::decode(config, data, *tile))
             .collect();
         for ((_, _, places), picture) in chunk.iter().zip(pictures) {
             let picture = picture?;

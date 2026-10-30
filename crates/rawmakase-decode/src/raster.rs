@@ -1518,4 +1518,34 @@ mod tests {
         // The header is RAWmakase's to read either way.
         assert_eq!(super::dimensions(&fixture("grid.heic")), Some((120, 100)));
     }
+
+    /// A header saying a picture is smaller than it is coded is not believed:
+    /// the picture is refused, by RAWmakase's own decoder before it allocates
+    /// it, by a system decoder by its size.
+    #[test]
+    fn a_heic_coded_larger_than_its_header_says_is_refused() {
+        if cfg!(any(
+            target_os = "macos",
+            all(feature = "software-hevc", not(windows))
+        )) {
+            let image = decode(&fixture("wide.heic")).unwrap();
+            assert_eq!(image.dimensions(), (192, 128));
+            assert_corners_near(corners(&image), UPRIGHT, 4);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = std::fs::read(fixture("wide.heic")).unwrap();
+        // ispe: 192 x 128 becomes 64 x 64.
+        let at = bytes.windows(4).position(|w| w == b"ispe").unwrap() + 8;
+        bytes[at..at + 8].copy_from_slice(&[0, 0, 0, 64, 0, 0, 0, 64]);
+        let path = dir.path().join("small-header.heic");
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(super::dimensions(&path), Some((64, 64)));
+        let error = format!("{:#}", decode(&path).unwrap_err());
+        if cfg!(all(
+            feature = "software-hevc",
+            not(any(target_os = "macos", windows))
+        )) {
+            assert!(error.contains("resource limit"), "{error}");
+        }
+    }
 }

@@ -170,6 +170,9 @@ def main(out: Path):
     # drawing's.
     pillow_heif.from_pillow(src).save(out / "identity.heic", quality=-1, chroma=444,
                                       matrix_coefficients=0)
+    # Coded larger than a 64x64 block, so a header claiming it smaller is
+    # caught before the picture is allocated.
+    pillow_heif.from_pillow(corners(192, 128)).save(out / "wide.heic", quality=80)
     deep.save(out / "pq.heic", quality=95, matrix_coefficients=9, color_primaries=9,
               transfer_characteristics=16)
 

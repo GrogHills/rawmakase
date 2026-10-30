@@ -4,12 +4,12 @@
 //!
 //! rust_h265 is young and may panic on malformed data rather than return an
 //! error. Being Rust, the panic unwinds, and [`decode`] catches it, so a
-//! corrupt file is an error, not a crash. Its own limits refuse a picture
-//! over 35.7 MP (HEVC level 6.2's largest) or 512 MiB of state before
-//! allocating it.
+//! corrupt file is an error, not a crash. Its limits refuse a picture larger
+//! than the header says, or of over 512 MiB of state, before allocating it, so
+//! a header claiming small tiles can't make it decode large ones.
 use super::Config;
 use anyhow::{Result, anyhow, bail};
-use rust_h265::{Decoder, Frame, PixelData, parse_hvcc, parse_nal};
+use rust_h265::{DecodeLimits, Decoder, Frame, PixelData, parse_hvcc, parse_nal};
 
 /// A decoded picture: luma, then two chroma planes each `chroma_width` wide,
 /// rows packed, 8-bit samples or deeper ones.
@@ -47,16 +47,29 @@ impl Picture {
 }
 
 /// The picture coded in `data`, an item's NAL units, after `config`'s
-/// parameter sets.
-pub(in crate::raster) fn decode(config: &Config, data: &[u8]) -> Result<Picture> {
-    let frame = std::panic::catch_unwind(|| decode_frame(config, data))
+/// parameter sets; refused, before it is allocated, if it is coded larger than
+/// `size`, the size the header gives it, allows.
+pub(in crate::raster) fn decode(config: &Config, data: &[u8], size: (u32, u32)) -> Result<Picture> {
+    let frame = std::panic::catch_unwind(|| decode_frame(config, data, limits(size)))
         .map_err(|_| anyhow!("The HEVC image data is corrupt"))??;
     picture(frame)
 }
 
-fn decode_frame(config: &Config, data: &[u8]) -> Result<Frame> {
+/// rust_h265's limits for a picture the header says is `width` × `height`: a
+/// picture is coded in whole coding blocks, of at most 64 pixels a side, and
+/// cropped to its size, so it is coded no larger than that size rounded up to
+/// 64s.
+fn limits((width, height): (u32, u32)) -> DecodeLimits {
+    let blocks = |v: u32| u64::from(v).div_ceil(64) * 64;
+    DecodeLimits {
+        max_picture_pixels: blocks(width).saturating_mul(blocks(height)),
+        ..DecodeLimits::default()
+    }
+}
+
+fn decode_frame(config: &Config, data: &[u8], limits: DecodeLimits) -> Result<Frame> {
     let failed = |e: rust_h265::DecodeError| anyhow!("Could not decode the HEVC image: {e}");
-    let mut decoder = Decoder::new();
+    let mut decoder = Decoder::with_limits(limits);
     for nal in config.parameter_sets.iter().filter_map(|n| parse_nal(n)) {
         decoder.decode_nal(&nal).map_err(failed)?;
     }
@@ -127,8 +140,19 @@ mod tests {
     #[test]
     fn data_without_a_picture_is_an_error() {
         let config = Config::read(&hvcc(&[])).unwrap();
-        let error = decode(&config, &[0, 0, 0, 2, 0x4e, 1]).err().unwrap();
+        let error = decode(&config, &[0, 0, 0, 2, 0x4e, 1], (8, 8))
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("missing"), "{error}");
-        assert!(decode(&config, &[]).is_err());
+        assert!(decode(&config, &[], (8, 8)).is_err());
+    }
+
+    #[test]
+    fn a_picture_may_be_coded_no_larger_than_its_size_in_whole_blocks() {
+        assert_eq!(limits((64, 64)).max_picture_pixels, 64 * 64);
+        assert_eq!(limits((16, 12)).max_picture_pixels, 64 * 64);
+        assert_eq!(limits((4032, 3024)).max_picture_pixels, 4032 * 3072);
+        // However large the header says it is.
+        assert_eq!(limits((u32::MAX, u32::MAX)).max_picture_pixels, u64::MAX);
     }
 }
