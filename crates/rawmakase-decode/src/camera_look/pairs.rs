@@ -18,6 +18,92 @@ pub(super) struct Preview {
     pub space: &'static str,
 }
 
+/// The colour space an embedded preview's file states for it, and whether it is a DNG
+/// Adobe software wrote.
+struct Stated {
+    adobe_dng: bool,
+    icc: Option<Vec<u8>>,
+    named: Option<(PreviewSpace<'static>, &'static str)>,
+}
+impl Stated {
+    fn space(&self) -> Option<(PreviewSpace<'_>, &'static str)> {
+        match &self.icc {
+            Some(icc) => Some((PreviewSpace::Icc(icc), "icc")),
+            None => self.named.as_ref().map(|(space, name)| {
+                let space = match space {
+                    PreviewSpace::AdobeRgb => PreviewSpace::AdobeRgb,
+                    _ => PreviewSpace::Srgb,
+                };
+                (space, *name)
+            }),
+        }
+    }
+}
+
+fn stated_space(path: &std::path::Path, raw: &crate::raw::Raw, bytes: &[u8]) -> Stated {
+    let raw_facts = rawmakase_interop::exif::colour_facts(path)
+        .or_else(|| {
+            // A CR3's EXIF is in boxes of its own: ColorSpace from there.
+            let exif = crate::photo::camera_exif(path)?;
+            let field = exif.get(rawmakase_interop::exif::tag::COLOR_SPACE)?;
+            Some(ColourFacts {
+                color_space: field.number().map(|v| v as u16),
+                ..Default::default()
+            })
+        })
+        .unwrap_or_default();
+    let adobe_dng = raw.metadata.baseline_exposure.is_some()
+        && raw_facts
+            .software
+            .as_deref()
+            .is_some_and(|s| s.trim_start().to_ascii_lowercase().starts_with("adobe"));
+    let facts = rawmakase_interop::exif::colour_facts_of_jpeg(bytes)
+        .unwrap_or_default()
+        .or(raw_facts);
+    let icc = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(bytes))
+        .ok()
+        .and_then(|mut d| image::ImageDecoder::icc_profile(&mut d).ok().flatten());
+    let named = match (facts.color_space, facts.interop_index.as_deref()) {
+        (Some(1), _) => Some((PreviewSpace::Srgb, "srgb")),
+        (Some(0xffff), Some(index)) if index.eq_ignore_ascii_case("R03") => {
+            Some((PreviewSpace::AdobeRgb, "adobe-rgb"))
+        }
+        // Nikon writes no EXIF ColorSpace and Olympus "uncalibrated" for Adobe RGB:
+        // their maker notes say it.
+        _ => match raw.maker_preview_space() {
+            Some(crate::raw::MakerPreviewSpace::Srgb) => {
+                Some((PreviewSpace::Srgb, "srgb-maker-note"))
+            }
+            Some(crate::raw::MakerPreviewSpace::AdobeRgb) => {
+                Some((PreviewSpace::AdobeRgb, "adobe-rgb-maker-note"))
+            }
+            None => None,
+        },
+    };
+    Stated {
+        adobe_dng,
+        icc,
+        named,
+    }
+}
+
+/// The embedded preview of the RAW at `path`, upright, as linear ProPhoto RGB in the
+/// colour space its file states, whatever a fit would make of it; `None` when none is
+/// stated, so it can only be taken as it is.
+pub(super) fn preview_pro(
+    path: &std::path::Path,
+    raw: &mut crate::raw::Raw,
+    image: &image::RgbImage,
+) -> Option<Vec<Rgb>> {
+    let bytes = raw.thumbnail().ok()?;
+    if crate::raw::is_jpeg_xl(&bytes) {
+        return None;
+    }
+    let stated = stated_space(path, raw, &bytes);
+    let (space, _) = stated.space()?;
+    crate::raster::rgb8_linear_pro_photo(image, space).ok()
+}
+
 /// The preview of the RAW at `path`, or why it can't be used: not a JPEG (JPEG XL
 /// previews are Lightroom's), too small, written by Adobe software into a DNG (its
 /// preview is Adobe's render), or of a colour space the file does not state.
@@ -33,50 +119,15 @@ pub(super) fn preview(
             "The embedded preview is JPEG XL, not the camera's JPEG",
         ));
     }
-    let raw_facts = rawmakase_interop::exif::colour_facts(path)
-        .or_else(|| {
-            // A CR3's EXIF is in boxes of its own: ColorSpace from there.
-            let exif = crate::photo::camera_exif(path)?;
-            let field = exif.get(rawmakase_interop::exif::tag::COLOR_SPACE)?;
-            Some(ColourFacts {
-                color_space: field.number().map(|v| v as u16),
-                ..Default::default()
-            })
-        })
-        .unwrap_or_default();
-    let is_dng = raw.metadata.baseline_exposure.is_some();
-    if is_dng
-        && raw_facts
-            .software
-            .as_deref()
-            .is_some_and(|s| s.trim_start().to_ascii_lowercase().starts_with("adobe"))
-    {
+    let stated = stated_space(path, raw, &bytes);
+    if stated.adobe_dng {
         return Err(refuse(
             "A DNG written by Adobe software: its preview is Adobe's render",
         ));
     }
-    let facts = rawmakase_interop::exif::colour_facts_of_jpeg(&bytes)
-        .unwrap_or_default()
-        .or(raw_facts);
-    let icc = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(bytes.as_slice()))
-        .ok()
-        .and_then(|mut d| image::ImageDecoder::icc_profile(&mut d).ok().flatten());
-    let (space, name) = match (&icc, facts.color_space, facts.interop_index.as_deref()) {
-        (Some(icc), ..) => (PreviewSpace::Icc(icc), "icc"),
-        (None, Some(1), _) => (PreviewSpace::Srgb, "srgb"),
-        (None, Some(0xffff), Some(index)) if index.eq_ignore_ascii_case("R03") => {
-            (PreviewSpace::AdobeRgb, "adobe-rgb")
-        }
-        // Nikon writes no EXIF ColorSpace and Olympus "uncalibrated" for Adobe RGB:
-        // their maker notes say it.
-        (None, ..) => match raw.maker_preview_space() {
-            Some(crate::raw::MakerPreviewSpace::Srgb) => (PreviewSpace::Srgb, "srgb-maker-note"),
-            Some(crate::raw::MakerPreviewSpace::AdobeRgb) => {
-                (PreviewSpace::AdobeRgb, "adobe-rgb-maker-note")
-            }
-            None => return Err(refuse("The preview's colour space is not stated")),
-        },
-    };
+    let (space, name) = stated
+        .space()
+        .ok_or_else(|| refuse("The preview's colour space is not stated"))?;
     let image = crate::raw::thumbnail(raw).map_err(|e| refuse(format!("{e:#}")))?;
     let (width, height) = image.dimensions();
     if width.max(height) < 2 * PROXY_EDGE {

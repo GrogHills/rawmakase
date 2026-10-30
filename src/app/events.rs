@@ -144,6 +144,11 @@ impl Editor {
                     profile,
                     result,
                 } if id == self.load.id() => self.camera_look_ready(generation, profile, result),
+                Event::CameraThumbnail {
+                    id,
+                    generation,
+                    result,
+                } if id == self.load.id() => self.camera_thumbnail_ready(ctx, generation, result),
                 Event::Straighten {
                     id,
                     generation,

@@ -201,6 +201,12 @@ pub(crate) enum Event {
         profile: Option<Arc<crate::camera_profiles::CameraProfile>>,
         result: Result<Box<crate::camera_profiles::CameraProfile>, String>,
     },
+    /// The embedded JPEG of the photo loaded as `id`, or why there is none.
+    CameraThumbnail {
+        id: u64,
+        generation: u64,
+        result: Result<crate::camera_look::CameraPreview, String>,
+    },
     /// The Crop panel's Auto straighten angle for the photo loaded as `id`, analysed
     /// from `analysed`; None when the photo has nothing to level by.
     Straighten {

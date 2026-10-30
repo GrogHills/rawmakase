@@ -33,6 +33,7 @@ standalone `rawmakase-ctl`). The last two build without the app.
 
 | File | Responsibility |
 | --- | --- |
+| [src/app/camera_thumbnail.rs](../src/app/camera_thumbnail.rs) | The camera thumbnail view in Develop: the embedded JPEG, read once per photo off the UI thread, in place of the photo and labelled (a `Compare` view, Shift+\\). |
 | [src/app/camera_look.rs](../src/app/camera_look.rs) | Profile → Fit Camera Look: the fit as an app task (generation, cancel flag), applied as one History step unless a newer fit or another profile came meanwhile. |
 | [src/main.rs](../src/main.rs) | CLI argument parsing and command dispatch; starts the desktop application when no subcommand is selected. |
 | [src/lib.rs](../src/lib.rs) | The module list. The library serves the binary, examples and tests; it is not a stable public API. |

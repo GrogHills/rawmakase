@@ -27,7 +27,7 @@ use rawmakase_engine::develop;
 use rawmakase_model::{
     camera_data::{Decode, Metadata},
     camera_profiles::{CameraProfile, PRO_TO_RGB, fitted},
-    color::{mul, srgb_decode},
+    color::{mul, srgb_decode, srgb_encode},
     model::recipe::Recipe,
 };
 use serde::Serialize;
@@ -287,6 +287,35 @@ fn default_profile(
         );
     }
     result.ok()
+}
+
+/// The camera's embedded JPEG of a photo, upright, as sRGB, and the look the camera
+/// names for it.
+pub struct CameraPreview {
+    pub image: image::RgbImage,
+    pub look: Option<String>,
+}
+
+/// The [`CameraPreview`] of the photo at `path`: converted from the colour space the
+/// file states; one that states none is taken to be sRGB already.
+pub fn preview_srgb(path: &Path) -> anyhow::Result<CameraPreview> {
+    let mut raw = crate::photo::open(path)?;
+    let look = raw.metadata.camera_look.clone();
+    let image = crate::raw::thumbnail(&mut raw)?;
+    let image = match pairs::preview_pro(path, &mut raw, &image) {
+        Some(pro) => {
+            let bytes = pro
+                .iter()
+                .flat_map(|q| {
+                    mul(PRO_TO_RGB, *q).map(|v| (srgb_encode(v.clamp(0., 1.)) * 255. + 0.5) as u8)
+                })
+                .collect();
+            image::RgbImage::from_raw(image.width(), image.height(), bytes)
+                .ok_or_else(|| anyhow::anyhow!("The preview's pixels don't fit its size"))?
+        }
+        None => image,
+    };
+    Ok(CameraPreview { image, look })
 }
 
 /// Fits a camera look to the photo at `path`, or says why it can't.

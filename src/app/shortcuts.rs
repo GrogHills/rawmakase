@@ -99,7 +99,7 @@ const GENERAL: [Shortcut; 12] = [
     ("Cmd+,", "Preferences"),
     ("Cmd+/", "These shortcuts"),
 ];
-const DEVELOP: [Shortcut; 53] = [
+const DEVELOP: [Shortcut; 54] = [
     ("R", "Crop & Straighten"),
     ("Return", "Finish the crop"),
     ("X", "Swap the crop's orientation"),
@@ -127,6 +127,7 @@ const DEVELOP: [Shortcut; 53] = [
     ("A", "Visualize spots"),
     ("Space", "Pan while a tool is open"),
     ("\\", "Before alone"),
+    ("Shift+\\", "Camera thumbnail (the embedded JPEG)"),
     ("Y", "Before and after, left and right"),
     ("Option+Y", "Before and after, top and bottom"),
     ("Shift+Y", "Before and after, split"),

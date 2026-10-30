@@ -184,6 +184,7 @@ pub(super) enum Action {
     ToggleMono,
     Treatment(bool),
     Compare,
+    CameraThumbnail,
     Clipping,
     Zoom,
     Fit,
@@ -242,6 +243,7 @@ impl Action {
         ("treatment:bw", Self::Treatment(true)),
         ("treatment:color", Self::Treatment(false)),
         ("compare", Self::Compare),
+        ("camera_thumbnail", Self::CameraThumbnail),
         ("clipping", Self::Clipping),
         ("zoom", Self::Zoom),
         ("fit", Self::Fit),
@@ -999,6 +1001,7 @@ impl Editor {
                             .compare
                             .toggled(super::before_after::Compare::BeforeOnly),
                     ),
+                    CameraThumbnail => self.toggle_camera_thumbnail(),
                     Clipping => self.view.clipping.toggle_both(),
                     Zoom => self.view.zoom.on = !self.view.zoom.on,
                     Fit => self.view.zoom.on = false,
