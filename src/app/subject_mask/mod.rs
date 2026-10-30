@@ -20,7 +20,7 @@ use crate::model::recipe::Recipe;
 use rawmakase_inference::{Point, Prompt as ModelPrompt};
 use std::hash::{Hash, Hasher};
 
-pub(super) use models::Installer;
+pub(super) use models::{Models, Pack};
 
 /// Which of the two selections a request makes. Background is the same coverage with
 /// the component inverted, so adding a brush to it still adds coverage.
@@ -40,6 +40,13 @@ impl Feature {
     }
     fn invert(self) -> bool {
         self == Self::Background
+    }
+    /// The models it needs.
+    pub(super) fn pack(self) -> Pack {
+        match self {
+            Self::Sky => Pack::Sky,
+            Self::Subject | Self::Background => Pack::Subject,
+        }
     }
     /// What the raster is a selection of, as its provenance says.
     pub(super) fn provenance(self) -> &'static str {
@@ -276,7 +283,7 @@ pub(super) struct Selection {
     failure: Option<(Request, Failure)>,
     prompt: Option<Prompt>,
     worker: worker::Worker,
-    pub(super) models: Installer,
+    pub(super) models: Models,
     /// The remote worker to ask instead, when configured; `Default` reads
     /// nothing until the endpoint is asked for.
     pub(super) remote: worker::RemoteConfig,
@@ -330,7 +337,8 @@ impl Selection {
             self.worker.stop(),
             Stopping::new(self.upgrade_thread.take()),
         ];
-        stopping.extend(self.models.stop());
+        stopping.extend(self.models.subject.stop());
+        stopping.extend(self.models.sky.stop());
         stopping
     }
 }
@@ -359,7 +367,7 @@ impl Editor {
             return;
         }
         if let Some(why) = self.selection_unavailable() {
-            self.status = why.into();
+            self.messages.warn(why);
             return;
         }
         let masks = &self.document.edit.recipe().masks;
@@ -371,7 +379,8 @@ impl Editor {
             Target::Regenerate { .. } => true,
         };
         if !room {
-            self.status = format!("A photo holds up to {MAX_GROUPS} masks");
+            self.messages
+                .warn(format!("A photo holds up to {MAX_GROUPS} masks"));
             return;
         }
         let upgraded = self
@@ -385,7 +394,7 @@ impl Editor {
         }
         // Over the remote worker, the models do not have to be here at all.
         let remote = self.selection.remote.endpoint().is_some();
-        if !remote && !self.selection.models.installed() {
+        if !remote && !self.selection.models.of(request.feature.pack()).installed() {
             self.selection.prompt = Some(Prompt::Model(request));
             return;
         }
@@ -399,7 +408,8 @@ impl Editor {
     pub(super) fn begin_aiming(&mut self, request: Request) {
         self.context.request_repaint();
         let remote = self.selection.remote.endpoint().is_some();
-        if self.selection_unavailable().is_some() || (!remote && !self.selection.models.installed())
+        if self.selection_unavailable().is_some()
+            || (!remote && !self.selection.models.subject.installed())
         {
             self.request_selection(request);
             return;
@@ -415,7 +425,8 @@ impl Editor {
             },
         });
         self.view.tool = super::state::Tool::Mask;
-        self.status = "Click the subject on the photo, or drag a box around it".into();
+        self.messages
+            .note("Click the subject on the photo, or drag a box around it");
     }
     /// Aims at a generated component: clicks on the photo add to it and leave things
     /// out of it, each one refining the same mask.
@@ -438,7 +449,8 @@ impl Editor {
             target: Target::Regenerate { mask, component },
         };
         let remote = self.selection.remote.endpoint().is_some();
-        if self.selection_unavailable().is_some() || (!remote && !self.selection.models.installed())
+        if self.selection_unavailable().is_some()
+            || (!remote && !self.selection.models.subject.installed())
         {
             self.request_selection(request);
             return;
@@ -451,7 +463,8 @@ impl Editor {
             applied: Some((mask, component)),
         });
         self.view.tool = super::state::Tool::Mask;
-        self.status = "Click the part of the photo to add, Alt-click to leave out".into();
+        self.messages
+            .note("Click the part of the photo to add, Alt-click to leave out");
     }
     /// A click on the photo while aiming: a point on the object (or, with `positive`
     /// false, on something to leave out). Starts or refines the selection.
@@ -552,7 +565,11 @@ impl Editor {
         let model = if endpoint.is_some() {
             None
         } else {
-            match self.selection.models.path() {
+            let pack = match &action {
+                Action::Auto(feature) => feature.pack(),
+                Action::Click(_) => Pack::Subject,
+            };
+            match self.selection.models.of(pack).path() {
                 Some(model) => Some(model),
                 None => {
                     self.selection.end_prompting();
@@ -562,10 +579,11 @@ impl Editor {
             }
         };
         self.context.request_repaint();
-        self.status = match &action {
+        let text: String = match &action {
             Action::Auto(feature) => format!("Finding the {}…", feature.name().to_lowercase()),
             Action::Click(_) => "Selecting…".into(),
         };
+        self.messages.note(text);
         let (generation, cancel) = self.selection.task.start();
         let recipe = self.document.edit.recipe().clone();
         self.selection.pending = Some(Pending {
@@ -590,7 +608,7 @@ impl Editor {
     pub(super) fn cancel_selection(&mut self) {
         self.context.request_repaint();
         self.selection.cancel();
-        self.status = "Selection cancelled".into();
+        self.messages.note("Selection cancelled");
     }
     /// A selection finished: apply it if it is still the one wanted and the edit it
     /// was made for still stands, else drop it.
@@ -619,13 +637,14 @@ impl Editor {
             Ok(generated) => generated,
             Err(Failure::Cancelled) => return,
             Err(failure) => {
-                self.status = failure.message();
+                self.messages.fail(failure.message());
                 self.selection.failure = Some((request, failure));
                 return;
             }
         };
         if !pending.guard.holds(self.document.edit.recipe(), request) {
-            self.status = "The masks changed while selecting; nothing was added".into();
+            self.messages
+                .warn("The masks changed while selecting; nothing was added");
             self.discard_generated(Some(generated));
             return;
         }
@@ -641,7 +660,8 @@ impl Editor {
             .collect();
         let bytes = crate::storage::mask_assets::decoded_bytes(ids);
         if bytes > crate::storage::mask_assets::EDIT_BYTES {
-            self.status = "This photo's masks use too much memory for another selection".into();
+            self.messages
+                .warn("This photo's masks use too much memory for another selection");
             self.discard_generated(Some(generated));
             return;
         }
@@ -700,7 +720,8 @@ impl Editor {
             // selected, so it draws no overlay; with neutral sliders nothing else would
             // show the mask until some later change. Render again, now with it.
             self.schedule();
-            self.status = format!("{} selected", request.feature.name());
+            self.messages
+                .note(format!("{} selected", request.feature.name()));
         }
     }
     /// Forgets the raster of a result the edit did not take, so results the user never
@@ -737,31 +758,38 @@ impl Editor {
     }
     /// The installer finished or was cancelled; a request waiting for the model goes
     /// on.
-    pub(super) fn model_installed(&mut self, result: Result<(), String>) {
+    pub(super) fn model_installed(&mut self, pack: Pack, result: Result<(), String>) {
         match result {
             Ok(()) => {
-                self.status = "Selection model installed".into();
-                if let Some(Prompt::Model(request)) = self.selection.prompt.take() {
-                    self.request_selection(request);
+                self.messages.done("Selection model installed");
+                match self.selection.prompt {
+                    Some(Prompt::Model(request)) if request.feature.pack() == pack => {
+                        self.selection.prompt = None;
+                        self.request_selection(request);
+                    }
+                    _ => {}
                 }
             }
-            Err(why) => self.status = format!("Model not installed: {why}"),
+            Err(why) => self.messages.fail(format!("Model not installed: {why}")),
         }
     }
     /// Asks the installer to download the models (the setup card's Download).
-    pub(super) fn install_model(&mut self) {
+    pub(super) fn install_model(&mut self, pack: Pack) {
         self.context.request_repaint();
         self.selection
             .models
+            .of_mut(pack)
             .install(None, self.tx.clone(), self.context.clone());
     }
     /// Installs the models from a folder holding their files, each checked as a
     /// download is: for tests, which have no network.
     #[cfg(test)]
-    pub(super) fn install_model_from(&mut self, folder: std::path::PathBuf) {
-        self.selection
-            .models
-            .install(Some(folder), self.tx.clone(), self.context.clone());
+    pub(super) fn install_model_from(&mut self, pack: Pack, folder: std::path::PathBuf) {
+        self.selection.models.of_mut(pack).install(
+            Some(folder),
+            self.tx.clone(),
+            self.context.clone(),
+        );
     }
     /// Upgrades the open catalog on a thread of its own, after the edit is saved.
     pub(super) fn upgrade_catalog(&mut self, request: Request) {
@@ -772,7 +800,7 @@ impl Editor {
             .as_ref()
             .is_some_and(|t| !t.is_finished());
         if self.selection.upgrading.is_some() || running {
-            self.status = "The catalog is being upgraded".into();
+            self.messages.note("The catalog is being upgraded");
             return;
         }
         if !self.flush() {
@@ -805,7 +833,7 @@ impl Editor {
             Err(e) => {
                 self.selection.upgrading = None;
                 self.selection.upgrade_task.finish(generation);
-                self.status = format!("Catalog not upgraded: {e}");
+                self.messages.fail(format!("Catalog not upgraded: {e}"));
             }
         }
     }
@@ -826,12 +854,13 @@ impl Editor {
         match result {
             Ok(backup) => {
                 if let Some(backup) = backup {
-                    self.status = format!("Catalog upgraded · backup: {}", backup.display());
+                    self.messages
+                        .done(format!("Catalog upgraded · backup: {}", backup.display()));
                 }
                 self.selection.prompt = None;
                 self.request_selection(request);
             }
-            Err(why) => self.status = format!("Catalog not upgraded: {why}"),
+            Err(why) => self.messages.fail(format!("Catalog not upgraded: {why}")),
         }
     }
 }

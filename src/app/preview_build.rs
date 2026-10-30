@@ -59,6 +59,7 @@ const THUMBNAIL_EDGE: u32 = 640;
 pub(super) fn identity(
     record: &EditRecord,
     defaults: &DevelopDefaults,
+    library: &str,
     demosaic: Demosaic,
 ) -> String {
     let mut h = DefaultHasher::new();
@@ -68,6 +69,9 @@ pub(super) fn identity(
     record.lightroom().hash(&mut h);
     if record.recipe.is_none() && record.lightroom().is_none() {
         format!("{defaults:?}").hash(&mut h);
+        // Which profile a default picks, and a photo without colour data's fitted
+        // look, depend on the profile library.
+        library.hash(&mut h);
         rawmakase_export::build_info::SOFTWARE.hash(&mut h);
     }
     format!("{:?}", demosaic).hash(&mut h);
@@ -197,6 +201,8 @@ pub(super) fn render(item: &Item, cancel: &AtomicBool) -> anyhow::Result<image::
     let opened = crate::photo::open_source(&item.path, cancel)
         .with_context(|| format!("{} can't be read", item.path.display()))?;
     let (profiles, _) = crate::camera_profiles::installed(opened.metadata());
+    let profiles =
+        crate::camera_look::with_default(&item.path, opened.metadata(), profiles, cancel);
     let mut recipe = item_recipe(item, opened.metadata(), &profiles)?;
     let image = match opened {
         Opened::Raw(raw) if needs_full(&recipe, &raw.metadata, item.edge) => {
@@ -731,7 +737,7 @@ impl Editor {
         {
             return Err(format!(
                 "the open photo's edit could not be saved: {}",
-                self.status
+                self.messages.line()
             ));
         }
         let (items, skipped) = self.build_items(ids, kind, Files::Check)?;
@@ -819,7 +825,12 @@ impl Editor {
                 catalog: catalog.clone(),
                 photo,
                 name,
-                identity: identity(&record.edit, &self.raw_defaults, self.demosaic),
+                identity: identity(
+                    &record.edit,
+                    &self.raw_defaults,
+                    &self.profile_library,
+                    self.demosaic,
+                ),
                 ticket: edited.then(|| library.edited_ticket(photo)).flatten(),
                 record: record.edit,
                 path,
@@ -870,10 +881,10 @@ impl Editor {
 
     /// The thumbnail menu's Build Standard-Sized Previews.
     pub(super) fn build_previews_from_menu(&mut self, ids: &[PhotoId], kind: PreviewKind) {
-        self.status = match self.build_previews(ids, kind) {
-            Ok(queued) => queued_message(queued),
-            Err(e) => format!("Previews not built: {e}"),
-        };
+        match self.build_previews(ids, kind) {
+            Ok(queued) => self.messages.note(queued_message(queued)),
+            Err(e) => self.messages.fail(format!("Previews not built: {e}")),
+        }
     }
 
     /// Discard 1:1 Previews, or Standard and 1:1: the files' built previews of
@@ -899,10 +910,10 @@ impl Editor {
         } else {
             "previews"
         };
-        self.status = format!(
+        self.messages.note(format!(
             "Discarded the {which} of {}",
             plural(ids.len(), "photo", "photos")
-        );
+        ));
     }
 
     /// A photo leaving the catalog takes its requests along, so a later photo
@@ -986,7 +997,7 @@ impl Editor {
                     // The worker is gone: nothing more will finish.
                     builds.builder = None;
                     builds.catalog = None;
-                    self.status = "Previews stopped being built".into();
+                    self.messages.fail("Previews stopped being built");
                     break;
                 }
             }
@@ -1017,7 +1028,13 @@ impl Editor {
         let Ok(record) = library.session.catalog.edit_record(item.photo) else {
             return;
         };
-        if identity(&record, &self.raw_defaults, self.demosaic) == item.identity {
+        if identity(
+            &record,
+            &self.raw_defaults,
+            &self.profile_library,
+            self.demosaic,
+        ) == item.identity
+        {
             library.show_built_preview(&self.context, item.photo, thumbnail);
         }
     }

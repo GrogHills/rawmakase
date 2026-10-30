@@ -244,6 +244,11 @@ pub(crate) struct Header {
     pub make: String,
     pub model: String,
     pub normalized: [String; 2],
+    /// The make and model as the file writes them (`RawInfo::file_make`), which
+    /// Lensfun's camera entries use.
+    pub file_names: [String; 2],
+    /// The crop mode's crop factor over the sensor's (`RawInfo::sensor_crop`).
+    pub sensor_crop: Option<f32>,
     pub width: u32,
     pub height: u32,
     pub raw_width: u32,
@@ -273,6 +278,8 @@ pub(crate) struct Header {
     pub presets: [[f32; 3]; 4],
     pub matrix: [[f32; 3]; 3],
     pub cam_xyz: [[f32; 3]; 3],
+    pub matrix_source: rawmakase_model::camera_data::MatrixSource,
+    pub camera_look: Option<String>,
     pub lens: String,
     pub lens_id: u32,
     pub dng_version: u32,
@@ -303,6 +310,9 @@ impl Raw {
         };
         let ([crop_left, crop_top, crop_width, crop_height], camera_crop) = crops(&h);
         let mut metadata = Metadata {
+            exif_make: h.file_names[0].clone(),
+            exif_model: h.file_names[1].clone(),
+            sensor_crop: h.sensor_crop,
             width: h.width,
             height: h.height,
             raw_width: h.raw_width,
@@ -335,6 +345,9 @@ impl Raw {
             },
             matrix: h.matrix,
             cam_xyz: h.cam_xyz,
+            matrix_source: h.matrix_source,
+            camera_look: h.camera_look,
+            embedded_profile_status: Default::default(),
             lens: None,
             lens_stand_in: None,
             lens_model: h.lens.trim().to_string(),
@@ -346,6 +359,7 @@ impl Raw {
             dng_matrix_profile_signature: None,
             source: Source::Raw,
             lens_profiles: Default::default(),
+            lensfun: Default::default(),
             lateral_ca: Default::default(),
             embedded_dcp: None,
             levels: h.levels,
@@ -360,6 +374,11 @@ impl Raw {
             metadata,
             facts,
         })
+    }
+    /// The colour space the camera's maker notes give its JPEGs (Nikon's and
+    /// Olympus's ColorSpace), for a preview whose EXIF does not say it.
+    pub fn maker_preview_space(&self) -> Option<MakerPreviewSpace> {
+        self.own.preview_space()
     }
     /// The embedded JPEG preview, as stored.
     pub fn thumbnail(&mut self) -> Result<Vec<u8>> {
@@ -614,6 +633,17 @@ fn sony_frame(
 pub fn thumbnail(raw: &mut Raw) -> anyhow::Result<image::RgbImage> {
     let bytes = raw.thumbnail()?;
     preview_image(bytes, raw.metadata.flip)
+}
+/// A camera JPEG's colour space as its maker notes give it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MakerPreviewSpace {
+    Srgb,
+    AdobeRgb,
+}
+/// Whether an embedded preview's `bytes` (`Raw::thumbnail`'s) are JPEG XL, which
+/// Lightroom writes into DNGs, rather than a camera's JPEG.
+pub fn is_jpeg_xl(bytes: &[u8]) -> bool {
+    rawmakase_raw::is_jpeg_xl(bytes, 0)
 }
 /// The most pixels a JPEG XL preview may claim: a 100-megapixel camera's.
 /// Its header is read before any pixel, so a hostile one is refused before

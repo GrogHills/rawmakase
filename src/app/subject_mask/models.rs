@@ -5,7 +5,7 @@ use super::super::task::Stopping;
 use super::super::worker::Event;
 use eframe::egui;
 use rawmakase_inference::ModelFile;
-use rawmakase_inference::manifest::{all_files, total_bytes};
+use rawmakase_inference::manifest::{all_files, sky_files};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -23,9 +23,82 @@ struct Progress {
     cancel: AtomicBool,
 }
 
-/// The model on disk and the install in progress, if any.
+/// One set of model files, installed and removed as a unit: Subject and Background share
+/// one, Sky has its own, so neither obliges anyone to fetch the other's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Pack {
+    #[default]
+    Subject,
+    Sky,
+}
+impl Pack {
+    fn files(self) -> Vec<ModelFile> {
+        match self {
+            Self::Subject => all_files(),
+            Self::Sky => sky_files(),
+        }
+    }
+    fn bytes(self) -> u64 {
+        self.files().iter().map(|f| f.size_bytes).sum()
+    }
+    /// Where it is kept: under this computer's own data folder, in a folder named for the
+    /// model and its contract version, so a replacement model sits beside it.
+    pub(super) fn dir(self) -> PathBuf {
+        let (id, version) = match self {
+            Self::Subject => (
+                rawmakase_inference::SUBJECT.id,
+                rawmakase_inference::SUBJECT.version,
+            ),
+            Self::Sky => (
+                rawmakase_inference::SKY.id,
+                rawmakase_inference::SKY.version,
+            ),
+        };
+        crate::storage::local_data_dir()
+            .join("models")
+            .join(format!("{id}-v{version}"))
+    }
+    /// The megabytes the drawer quotes.
+    pub(super) fn megabytes(self) -> u64 {
+        self.bytes().div_ceil(1_000_000)
+    }
+}
+
+/// The installs of each pack.
+pub(crate) struct Models {
+    pub(in crate::app) subject: Installer,
+    pub(in crate::app) sky: Installer,
+}
+impl Default for Models {
+    fn default() -> Self {
+        Self {
+            subject: Installer::default(),
+            sky: Installer {
+                pack: Pack::Sky,
+                ..Installer::default()
+            },
+        }
+    }
+}
+impl Models {
+    pub(in crate::app) fn of(&self, pack: Pack) -> &Installer {
+        match pack {
+            Pack::Subject => &self.subject,
+            Pack::Sky => &self.sky,
+        }
+    }
+    pub(in crate::app) fn of_mut(&mut self, pack: Pack) -> &mut Installer {
+        match pack {
+            Pack::Subject => &mut self.subject,
+            Pack::Sky => &mut self.sky,
+        }
+    }
+}
+
+/// One pack on disk and the install in progress, if any.
 #[derive(Default)]
 pub(crate) struct Installer {
+    pack: Pack,
     /// What the folder held when last looked at, and when: the files on disk decide
     /// whether the models are installed (a copy made, or deleted, by hand counts), not
     /// a note of what this process did.
@@ -37,33 +110,22 @@ pub(crate) struct Installer {
     failed: Option<String>,
 }
 
-/// Where the model is kept: under this computer's own data folder, in a folder named
-/// for the model and its contract version, so a replacement model sits beside it.
-pub(super) fn model_dir() -> PathBuf {
-    crate::storage::local_data_dir()
-        .join("models")
-        .join(format!(
-            "{}-v{}",
-            rawmakase_inference::SUBJECT.id,
-            rawmakase_inference::SUBJECT.version
-        ))
-}
 /// Where the app looks for a runtime library it did not come with.
 pub(super) fn runtime_dir() -> PathBuf {
     crate::storage::local_data_dir().join("runtime")
 }
 /// Installed: every file there with its size, and the receipt the installer wrote
 /// after checking each one's SHA-256 says so for exactly these files.
-fn is_installed(dir: &Path) -> bool {
-    all_files().iter().all(|f| has(dir, f))
-        && std::fs::read_to_string(dir.join(RECEIPT)).is_ok_and(|r| r == receipt())
+fn is_installed(dir: &Path, pack: Pack) -> bool {
+    pack.files().iter().all(|f| has(dir, f))
+        && std::fs::read_to_string(dir.join(RECEIPT)).is_ok_and(|r| r == receipt(pack))
 }
 /// The file recording which files were checked, and against which digests.
 const RECEIPT: &str = "verified.txt";
 /// The file an install holds locked while it runs.
 const LOCK: &str = ".install.lock";
-fn receipt() -> String {
-    all_files()
+fn receipt(pack: Pack) -> String {
+    pack.files()
         .iter()
         .map(|f| format!("{} {} {}\n", f.sha256, f.size_bytes, f.name))
         .collect()
@@ -86,11 +148,6 @@ fn has(dir: &Path, file: &ModelFile) -> bool {
     std::fs::metadata(dir.join(file.name)).is_ok_and(|m| m.is_file() && m.len() == file.size_bytes)
 }
 
-/// The megabytes the drawer quotes.
-pub(super) fn download_megabytes() -> u64 {
-    total_bytes().div_ceil(1_000_000)
-}
-
 impl Installer {
     pub(in crate::app) fn installed(&self) -> bool {
         if self.removing {
@@ -100,7 +157,7 @@ impl Installer {
         match self.seen.get() {
             Some((at, installed)) if at.elapsed() < Duration::from_secs(1) => installed,
             _ => {
-                let installed = is_installed(&model_dir());
+                let installed = is_installed(&self.pack.dir(), self.pack);
                 self.seen.set(Some((std::time::Instant::now(), installed)));
                 installed
             }
@@ -111,7 +168,7 @@ impl Installer {
     }
     /// The folder holding the model's files.
     pub(in crate::app) fn path(&self) -> Option<PathBuf> {
-        self.installed().then(model_dir)
+        self.installed().then(|| self.pack.dir())
     }
     pub(in crate::app) fn busy(&self) -> bool {
         self.progress.is_some() || self.removing
@@ -120,7 +177,7 @@ impl Installer {
     pub(in crate::app) fn progress(&self) -> Option<(u64, u64)> {
         self.progress
             .as_ref()
-            .map(|p| (p.done.load(Ordering::Relaxed), total_bytes()))
+            .map(|p| (p.done.load(Ordering::Relaxed), self.pack.bytes()))
     }
     pub(in crate::app) fn cancel(&mut self) {
         if let Some(p) = &self.progress {
@@ -148,6 +205,7 @@ impl Installer {
         if self.busy() || self.installed() {
             return;
         }
+        let pack = self.pack;
         let progress = Arc::new(Progress::default());
         self.progress = Some(progress.clone());
         self.failed = None;
@@ -155,10 +213,10 @@ impl Installer {
             .name("model-install".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    install(import.as_deref(), &progress)
+                    install(pack, import.as_deref(), &progress)
                 }))
                 .unwrap_or_else(|_| Err("the install stopped unexpectedly".into()));
-                let _ = tx.send(Event::ModelInstalled(result));
+                let _ = tx.send(Event::ModelInstalled(pack, result));
                 ctx.request_repaint();
             });
         match spawned {
@@ -186,9 +244,10 @@ impl Installer {
             return;
         }
         self.removing = true;
+        let pack = self.pack;
         std::thread::spawn(move || {
             unload();
-            let result = std::fs::remove_dir_all(model_dir())
+            let result = std::fs::remove_dir_all(pack.dir())
                 .or_else(|e| {
                     if e.kind() == std::io::ErrorKind::NotFound {
                         Ok(())
@@ -197,7 +256,7 @@ impl Installer {
                     }
                 })
                 .map_err(|e| e.to_string());
-            let _ = tx.send(Event::ModelRemoved(result));
+            let _ = tx.send(Event::ModelRemoved(pack, result));
             ctx.request_repaint();
         });
     }
@@ -213,8 +272,8 @@ impl Installer {
 /// only what is missing, and a download that stopped part way is kept to be resumed,
 /// in this session or a later one; the receipt is written once every file has been
 /// checked. One install at a time across running instances: see [`lock`].
-fn install(import: Option<&Path>, progress: &Progress) -> Result<(), String> {
-    let dir = model_dir();
+fn install(pack: Pack, import: Option<&Path>, progress: &Progress) -> Result<(), String> {
+    let dir = pack.dir();
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     let _lock = lock(&dir, progress)?;
@@ -223,7 +282,7 @@ fn install(import: Option<&Path>, progress: &Progress) -> Result<(), String> {
     let _ = std::fs::remove_file(dir.join(RECEIPT));
     // Bytes of files already there count as done.
     let mut finished = 0u64;
-    for file in &all_files() {
+    for file in &pack.files() {
         let kept =
             has(&dir, file) && digest_of(&dir.join(file.name)).as_deref() == Some(file.sha256);
         if progress.cancel.load(Ordering::Relaxed) {
@@ -278,7 +337,7 @@ fn install(import: Option<&Path>, progress: &Progress) -> Result<(), String> {
         &dir.join(RECEIPT),
         crate::storage::Replace::Overwrite,
         |out| {
-            out.write_all(receipt().as_bytes())?;
+            out.write_all(receipt(pack).as_bytes())?;
             Ok(())
         },
     )
@@ -997,27 +1056,65 @@ mod tests {
     }
 
     #[test]
-    fn the_install_location_names_the_model_and_its_version() {
-        assert!(model_dir().ends_with(format!(
+    fn each_pack_has_a_folder_named_for_its_model_and_version() {
+        assert!(Pack::Subject.dir().ends_with(format!(
             "models/{}-v{}",
             rawmakase_inference::SUBJECT.id,
             rawmakase_inference::SUBJECT.version
         )));
-        assert!(download_megabytes() > 250);
+        assert!(Pack::Sky.dir().ends_with(format!(
+            "models/{}-v{}",
+            rawmakase_inference::SKY.id,
+            rawmakase_inference::SKY.version
+        )));
+        assert!(Pack::Subject.megabytes() > 250 && Pack::Sky.megabytes() > 200);
+    }
+
+    /// A folder holding `pack`'s files at their sizes, with its receipt.
+    fn fake_install(pack: Pack) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for file in pack.files() {
+            let f = std::fs::File::create(dir.path().join(file.name)).unwrap();
+            f.set_len(file.size_bytes).unwrap();
+        }
+        std::fs::write(dir.path().join(RECEIPT), receipt(pack)).unwrap();
+        dir
+    }
+
+    /// What an install from before Sky had its own model holds: it must keep working after
+    /// the update, without fetching anything.
+    #[test]
+    fn subjects_models_stay_installed_without_the_sky_model() {
+        let dir = fake_install(Pack::Subject);
+        assert!(is_installed(dir.path(), Pack::Subject));
+        assert!(!is_installed(dir.path(), Pack::Sky));
+        let receipt_of_the_old_install = [
+            "aacf1f7137bb6fffcf6bf166abcfabe28f57a76059254f3fb611c4a64a208119 467440 vision_encoder.onnx",
+            "260fd1f0a34e72a3dc79a739e563b4facc0ba75504818b433a1f808e66637456 162476288 vision_encoder.onnx_data",
+            "079c59b261f723ff5c6a125e69b0170a957b21c58738c28d2b0394ecd0587d7f 213114 prompt_encoder_mask_decoder.onnx",
+            "f9e59a584ab8ced21fa812c211bc01084204db1c9e92a5ef4fb3a49972b4e864 20958208 prompt_encoder_mask_decoder.onnx_data",
+            "afd9f02d864302d690356fd4bfcb2feed2397a1190bf46a7306cb430464d734a 86559030 detr-panoptic-fp16.onnx",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(receipt(Pack::Subject), receipt_of_the_old_install);
+        let sky = fake_install(Pack::Sky);
+        assert!(is_installed(sky.path(), Pack::Sky));
+        assert!(!is_installed(sky.path(), Pack::Subject));
     }
 
     #[test]
     fn a_model_is_installed_only_when_every_file_is_there_with_its_size_and_checked() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!is_installed(dir.path()));
+        assert!(!is_installed(dir.path(), Pack::Subject));
         for file in all_files() {
             let f = std::fs::File::create(dir.path().join(file.name)).unwrap();
             f.set_len(file.size_bytes).unwrap();
         }
         // The right sizes are not enough without the installer's receipt.
-        assert!(!is_installed(dir.path()));
-        std::fs::write(dir.path().join(RECEIPT), receipt()).unwrap();
-        assert!(is_installed(dir.path()));
+        assert!(!is_installed(dir.path(), Pack::Subject));
+        std::fs::write(dir.path().join(RECEIPT), receipt(Pack::Subject)).unwrap();
+        assert!(is_installed(dir.path(), Pack::Subject));
         assert_eq!(
             digest_of(&dir.path().join(all_files()[0].name)).map(|d| d.len()),
             Some(64)
@@ -1026,6 +1123,6 @@ mod tests {
             .unwrap()
             .set_len(5)
             .unwrap();
-        assert!(!is_installed(dir.path()));
+        assert!(!is_installed(dir.path(), Pack::Subject));
     }
 }

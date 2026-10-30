@@ -82,7 +82,64 @@ pub(in crate::catalog) fn new_batch(w: &mut Write<'_>, kind: ImportKind) -> Resu
         &[&kind.as_str()],
     )
 }
+/// The longest gap between two frames of a burst whose camera didn't number
+/// them (Canon's and Nikon's continuous drive), for Stack Camera Bursts when
+/// adding photos: kept with the batch, the input its stacking takes.
+pub const IMPORT_BURST_SECONDS: f64 = 2.;
+
+/// A batch added with Stack Camera Bursts whose bursts aren't stacked yet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingBurstStacks {
+    pub batch: i64,
+    /// The longest gap between frames a camera didn't number.
+    pub seconds: f64,
+    /// The batch's photos still in the catalog.
+    pub photos: Vec<PhotoId>,
+}
+
 impl Catalog {
+    /// The batches added with Stack Camera Bursts whose bursts are still to
+    /// be stacked, oldest first: kept until stacked, across restarts.
+    pub fn pending_burst_stacks(&self) -> Result<Vec<PendingBurstStacks>> {
+        row! {
+            struct Pending {
+                batch: i64,
+                seconds: f64,
+            }
+        }
+        row! {
+            struct Member {
+                batch: i64,
+                photo: PhotoId,
+            }
+        }
+        self.db.snapshot(|s| {
+            let pending: Vec<Pending> = s.read(
+                sql!("SELECT batch, seconds FROM import_burst_stacks ORDER BY batch"),
+                &[],
+            )?;
+            let members: Vec<Member> = s.read(
+                sql!(
+                    "SELECT i.batch, i.photo FROM photo_imports i
+                     JOIN import_burst_stacks b ON b.batch = i.batch
+                     ORDER BY i.photo"
+                ),
+                &[],
+            )?;
+            let mut photos: HashMap<i64, Vec<PhotoId>> = HashMap::new();
+            for m in members {
+                photos.entry(m.batch).or_default().push(m.photo);
+            }
+            Ok(pending
+                .into_iter()
+                .map(|p| PendingBurstStacks {
+                    batch: p.batch,
+                    seconds: p.seconds,
+                    photos: photos.remove(&p.batch).unwrap_or_default(),
+                })
+                .collect())
+        })
+    }
     /// Lightroom's Previous Import: the photos the last Add Photo Folder or
     /// Synchronize added that are still in the catalog.
     pub fn previous_import(&self) -> Result<Vec<PhotoId>> {
@@ -122,24 +179,7 @@ impl Catalog {
     /// and a root left without folders goes too. Nothing on disk is touched.
     /// Returns the photos removed; their ids may be given to new photos.
     pub fn remove_folders(&mut self, folders: &[FolderId]) -> Result<Vec<PhotoId>> {
-        self.db.write(|w| {
-            let mut roots = BTreeSet::new();
-            for folder in folders {
-                let root: Option<RootId> =
-                    w.read_optional(sql!("SELECT root FROM folders WHERE id=?"), &[folder])?;
-                roots.extend(root);
-            }
-            let photos = remove_folder_rows(w, folders)?;
-            for root in &roots {
-                let left: Option<FolderId> =
-                    w.read_optional(sql!("SELECT id FROM folders WHERE root=?"), &[root])?;
-                if left.is_none() {
-                    w.execute(sql!("DELETE FROM folder_locations WHERE root=?"), &[root])?;
-                    w.execute(sql!("DELETE FROM roots WHERE id=?"), &[root])?;
-                }
-            }
-            Ok(photos)
-        })
+        self.db.write(|w| remove_folders(w, folders))
     }
     /// Removes root `root` from the catalog when it has no folder left (a
     /// folder put in the Trash or moved to another root took its last one);
@@ -272,7 +312,17 @@ impl Catalog {
             .map(|(file, place)| self.read_new_photo(file, place, defaults))
             .collect();
         let edited_at = rawmakase_model::time::now_text();
-        let (added, report, edits) = self.db.write(|w| {
+        // An edit naming a Lensfun lens raises the catalog to the format for them,
+        // in this transaction.
+        let stores = if photos
+            .iter()
+            .any(|p| p.edit.as_ref().is_some_and(|e| e.lensfun))
+        {
+            super::format_upgrade::Stores::Lensfun
+        } else {
+            super::format_upgrade::Stores::Recipes
+        };
+        let write = |w: &mut super::db::Write<'_>| {
             // The newest batch is Previous Import, empty when nothing new
             // was found.
             let batch = new_batch(w, kind)?;
@@ -356,8 +406,20 @@ impl Catalog {
                     super::defaults::fill(w, id, &photo.defaults)?;
                 }
             }
+            // Its bursts are stacked once their files are read; asked with
+            // the batch, so it is there with the photos or not at all.
+            if defaults.stack_bursts() && added > 0 {
+                w.execute(
+                    sql!("INSERT INTO import_burst_stacks(batch, seconds) VALUES(?, ?)"),
+                    &[&batch, &IMPORT_BURST_SECONDS],
+                )?;
+            }
             Ok((added, report, edits))
-        })?;
+        };
+        let (added, report, edits) = match stores {
+            super::format_upgrade::Stores::Lensfun => self.write_recipes(stores, write)?,
+            super::format_upgrade::Stores::Recipes => self.db.write(write)?,
+        };
         edits.iter().for_each(|change| change.committed());
         Ok((added, report))
     }
@@ -415,7 +477,11 @@ impl Catalog {
             .map(|bitmap| Ok((bitmap.hash(), bitmap.compress()?)))
             .collect::<Result<_>>()?;
         let checked = self.check_new_edit(file, &sidecar.recipe, &sidecar.export)?;
-        Ok(Some(LegacyEdit { bitmaps, checked }))
+        Ok(Some(LegacyEdit {
+            bitmaps,
+            checked,
+            lensfun: sidecar.recipe.uses_lensfun(),
+        }))
     }
 }
 
@@ -519,6 +585,8 @@ struct NewPhoto<'a> {
 struct LegacyEdit {
     bitmaps: Vec<(String, Vec<u8>)>,
     checked: super::edit_rows::CheckedNew,
+    /// It names a Lensfun lens (`format_upgrade::Stores`).
+    lensfun: bool,
 }
 
 /// This computer's locations, for matching folders found on disk.
@@ -708,6 +776,28 @@ impl Matcher {
 /// is touched. Returns the photos removed, sorted. Ungated: its callers
 /// decide that the rows may go (Remove Folder from Catalog, or a folder
 /// proven in the Trash).
+/// [`Catalog::remove_folders`] in `w`'s transaction.
+pub(in crate::catalog) fn remove_folders(
+    w: &mut Write<'_>,
+    folders: &[FolderId],
+) -> Result<Vec<PhotoId>> {
+    let mut roots = BTreeSet::new();
+    for folder in folders {
+        let root: Option<RootId> =
+            w.read_optional(sql!("SELECT root FROM folders WHERE id=?"), &[folder])?;
+        roots.extend(root);
+    }
+    let photos = remove_folder_rows(w, folders)?;
+    for root in &roots {
+        let left: Option<FolderId> =
+            w.read_optional(sql!("SELECT id FROM folders WHERE root=?"), &[root])?;
+        if left.is_none() {
+            w.execute(sql!("DELETE FROM folder_locations WHERE root=?"), &[root])?;
+            w.execute(sql!("DELETE FROM roots WHERE id=?"), &[root])?;
+        }
+    }
+    Ok(photos)
+}
 pub(in crate::catalog) fn remove_folder_rows(
     w: &mut Write<'_>,
     folders: &[FolderId],

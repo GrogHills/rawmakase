@@ -23,8 +23,10 @@ neutral sliders and its overlay shown.
   photo's own (no halo under a local adjustment). It
   knows nothing else: for a sign, a car or a rocket it says "No person or animal found"
   and offers **Click the subject…**.
-- **Sky** is the sky label, drawn with Segment Anything 2's outlines and cut where the sky
-  ends so a lake reflecting it is not included. "No sky found" when there is none.
+- **Sky** is where a scene-parsing model (UperNet with ConvNeXt, trained on ADE20K) says
+  the sky is, pixel by pixel, with the edge moved onto the photo's. It has its own class
+  for water, so a lake reflecting the sky is left out by the model and not by where it
+  lies. "No sky found" when less than 1% of the frame is sky.
 - **Background** is the subject inverted as a component, so adding a brush to it still
   adds coverage.
 - **Regenerate** on a selected generated component finds it again, replacing only that
@@ -38,15 +40,19 @@ Setting up: the first use shows a card in place of the tiles with the steps that
 left, in order, with the finished ones ticked: upgrade the catalog, then download the
 models.
 
-- **On this computer.** The models are downloaded on request (Segment Anything 2.1 Hiera
-  small, four files, 184 MB; DETR panoptic, 87 MB; each file checked against a pinned SHA-256); nothing downloads at startup, on opening a
+- **On this computer.** The models are downloaded on request, each feature's when it is
+  first used: Subject and Background share Segment Anything 2.1 Hiera small (four files,
+  184 MB) and DETR panoptic (87 MB); Sky has UperNet (one file, 243 MB). Each file is
+  checked against a pinned SHA-256; nothing downloads at startup, on opening a
   catalog or the drawer, or at an update. They run on the CPU through ONNX Runtime, which
   ships with every package, Arch included (beside the executable, or in
   `/usr/lib/rawmakase` on Linux; `make install` from source does not install it, so put
   `libonnxruntime` in the data folder's `runtime/` or name it in `RAWMAKASE_ORT_LIB`). No photo leaves the
-  computer. **Remove selection model** deletes them; saved masks keep working without
-  them or the runtime. The first selection on a photo takes a few seconds; Subject, Sky,
-  Background and clicks on the same photo after that are quick.
+  computer. **Remove selection model** and **Remove sky model** delete them; saved masks keep
+  working without them or the runtime. The first selection on a photo takes a few seconds;
+  Subject, Background and clicks on the same photo after that are quick, and so is Sky
+  again. Sky is the slower and heavier one: about 5 seconds and 2.5 GB of memory while it
+  runs, on the 16-thread laptop CPU it was measured on, with 8 threads.
 - **Catalog only.** The result is a raster stored in the catalog, so it needs a catalog
   photo. A catalog of the first format asks to **Upgrade catalog…**: a backup copy is
   written beside it, then it becomes the current format version, which older releases
@@ -63,7 +69,7 @@ models.
   garbage-collected, so a catalog only grows with them. Grow/shrink and feather are
   not implemented. Fine hair is as sharp as the 256-pixel mask and the edge refinement
   make it, not a matting model's. Subject is limited to what DETR was trained to name (people and animals); clicks
-  cover the rest. Sky follows DETR's sky label, which can miss a very dark sky.
+  cover the rest. Sky is as sharp as the model's answer and the edge refinement make it: thin wires are not separated from it; dark rock or ceilings can be taken for a night sky, a sea lost in haze for sky, and a thin blown-out gap of sky can be missed.
 
 ## Using it
 

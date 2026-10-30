@@ -36,6 +36,20 @@ pub(crate) struct FolderRemoval {
     pub(crate) photos: usize,
     /// A root with no folder left in the catalog, removed on its own.
     pub(crate) empty_root: Option<RootId>,
+    /// The folders as Export as Catalog wrote them: removed only while they
+    /// are still that.
+    pub(crate) exported: Option<crate::catalog::ExportedFolders>,
+}
+/// Export as Catalog chosen in the Folders panel or a photo's menu, for the
+/// editor to run.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CatalogExportRequest {
+    /// What to name the new catalog, unless the user names it otherwise.
+    pub(crate) name: String,
+    pub(crate) scope: crate::catalog::ExportScope,
+    /// For a folder, removing it from the catalog, to offer once it is
+    /// exported.
+    pub(crate) removal: Option<FolderRemoval>,
 }
 /// Where the Library was: its source, filter bar and selection, for undo to
 /// return to.
@@ -207,6 +221,8 @@ pub(crate) struct Library {
     /// A folder chosen in the Folders panel to be removed, for the editor
     /// to confirm.
     removal_request: Option<FolderRemoval>,
+    /// Export as Catalog chosen in the Folders panel or a photo's menu.
+    export_request: Option<CatalogExportRequest>,
     /// Synchronize Folder chosen in the Folders panel, for the editor.
     sync_request: Option<(crate::catalog::folder_sync::SyncScope, String)>,
     /// Find on Disk… chosen in a photo's menu, for the editor.
@@ -235,6 +251,9 @@ pub(crate) struct Library {
     stack_done: Vec<StackCommand>,
     /// Auto-Stack by Capture Time's window, while it is open.
     auto_stack: Option<stacks::AutoStack>,
+    /// Stack Camera Bursts for photos added: what was read of batches still
+    /// to be stacked, until they can be.
+    import_bursts: Option<crate::catalog_session::BurstsRead>,
     /// The Loupe's Info overlay.
     loupe_info: photo_info::Overlay,
     /// Times photo info read from files was saved, so views know to refresh.
@@ -255,10 +274,7 @@ pub(crate) struct Library {
     /// External volumes attached at the last check, to notice one returning;
     /// None before the first check.
     attached: Option<HashSet<std::path::PathBuf>>,
-    pub message: String,
-    /// What a message sums up, one item per line, shown on hover while that
-    /// message is: (message, detail).
-    message_detail: (String, String),
+    pub(in crate::app) messages: crate::app::messages::Messages,
     /// Photos to Read Metadata from Files for, once confirmed.
     read_request: Option<Vec<PhotoId>>,
     /// A file operation asked for (Delete, the thumbnail menu), for the
@@ -326,6 +342,7 @@ impl Library {
             ctx,
             copy_request: None,
             removal_request: None,
+            export_request: None,
             sync_request: None,
             find_request: None,
             offer_previous_import: false,
@@ -336,6 +353,7 @@ impl Library {
             descriptive_done: Vec::new(),
             stack_done: Vec::new(),
             auto_stack: None,
+            import_bursts: None,
             loupe,
             compare: Default::default(),
             survey: Default::default(),
@@ -352,8 +370,7 @@ impl Library {
             grid_kinetic: Default::default(),
             grid_shown: 0..usize::MAX,
             attached: None,
-            message: String::new(),
-            message_detail: Default::default(),
+            messages: Default::default(),
             read_request: None,
             file_request: None,
             reads_suspended: false,
@@ -366,10 +383,10 @@ impl Library {
         s.reloaded();
         s.check_files();
         if let Some(e) = keyword_export {
-            s.message = format!(
+            s.messages.warn(format!(
                 "Lightroom's keyword export options could not be read: {e:#}. \
                  Exports include every keyword's parents until they are."
-            );
+            ));
         }
         // Start with a selection, as Lightroom does, so the side panels are filled.
         s.select(s.visible.first().map(|i| s.session.photos[*i].id));
@@ -715,7 +732,7 @@ impl Library {
         self.scroll_to_active = true;
     }
     /// Whether Read Metadata from Files finished since the last call, for
-    /// the status line to show its outcome.
+    /// the top bar to show its outcome.
     /// Read Metadata from Files is still applying what it read.
     pub(in crate::app) fn rereading(&self) -> bool {
         self.reread.is_some()
@@ -749,10 +766,11 @@ impl Library {
                 plural(ids.len(), "photo", "photos")
             );
             if let Err(e) = self.record_collection(quick, Vec::new(), ids, summary) {
-                self.message = format!("Quick Collection not changed: {e}");
+                self.messages
+                    .fail(format!("Quick Collection not changed: {e}"));
             }
         } else if self.filters.collection.is_some() {
-            self.message = "Imported collections can't be changed".into();
+            self.messages.warn("Imported collections can't be changed");
         } else {
             self.file_request = Some(FileRequest::Delete(ids));
         }
@@ -966,8 +984,15 @@ impl Library {
     pub(in crate::app) fn suspend_background_reads(&mut self) {
         self.reads_suspended = true;
         self.cancel_reread();
-        self.session.stop_background_reads();
+        self.stop_background_reads();
         self.session.bump_generation();
+    }
+    /// Stops the session's background reads before a change that may give
+    /// removed photos' ids to new ones, and drops what was read of batches
+    /// whose bursts are to be stacked: read again after.
+    pub(in crate::app) fn stop_background_reads(&mut self) {
+        self.import_bursts = None;
+        self.session.stop_background_reads();
     }
     /// Background reads go on after a file operation let the catalog go:
     /// capture times, photo info and checksums, for what is still missing.
@@ -975,6 +1000,7 @@ impl Library {
         self.reads_suspended = false;
         self.start_capture_times();
         self.start_photo_info();
+        self.start_import_stacks();
         self.start_checksums();
     }
     /// A virtual copy command chosen from a thumbnail menu since last asked.
@@ -1048,13 +1074,17 @@ impl Library {
     pub(in crate::app) fn take_removal_request(&mut self) -> Option<FolderRemoval> {
         self.removal_request.take()
     }
+    pub(in crate::app) fn take_export_request(&mut self) -> Option<CatalogExportRequest> {
+        self.export_request.take()
+    }
     /// Creates a virtual copy of `id` and selects it.
     pub(super) fn create_virtual_copy(&mut self, id: PhotoId) -> Result<Committed<PhotoId>> {
         let made = self.session.create_virtual_copy(id)?;
         if self.listed_after(&made.listed, "Copy made") {
             self.show(made.value);
             if let Some(p) = self.photo(made.value) {
-                self.message = format!("Created {} of {}", p.copy_name, p.filename);
+                self.messages
+                    .done(format!("Created {} of {}", p.copy_name, p.filename));
             }
         }
         Ok(made)
@@ -1064,7 +1094,8 @@ impl Library {
         if self.listed_after(&made.listed, "Master changed") {
             self.show(id);
             if let Some(p) = self.photo(id) {
-                self.message = format!("This copy is now the master of {}", p.filename);
+                self.messages
+                    .done(format!("This copy is now the master of {}", p.filename));
             }
         }
         Ok(made)
@@ -1079,7 +1110,9 @@ impl Library {
                 true
             }
             Err(e) => {
-                self.message = format!("{done}, but the catalog could not be read again: {e:#}");
+                self.messages.fail(format!(
+                    "{done}, but the catalog could not be read again: {e:#}"
+                ));
                 false
             }
         }
@@ -1103,24 +1136,32 @@ impl Library {
             self.filters.folder_scope = None;
         }
         if self.listed_after(&removed.listed, "Root removed") {
-            self.message = match removed.value {
-                true => format!("Removed {name} from the catalog. Its folder is still on disk."),
-                false => format!("{name} was not removed: it has folders in the catalog again."),
-            };
+            match removed.value {
+                true => self.messages.done(format!(
+                    "Removed {name} from the catalog. Its folder is still on disk."
+                )),
+                false => self.messages.warn(format!(
+                    "{name} was not removed: it has folders in the catalog again."
+                )),
+            }
         }
         Ok(())
     }
     /// Removes `folders` and their photos from the catalog, leaving the files;
     /// returns the photos removed. The Library shows All Photographs if it
-    /// showed one of them. An error means nothing was removed.
+    /// showed one of them. An error means nothing was removed. Folders
+    /// `exported` are removed only while they are still what was exported.
     pub(in crate::app) fn remove_folders(
         &mut self,
         folders: &HashSet<FolderId>,
         name: &str,
+        exported: Option<&crate::catalog::ExportedFolders>,
     ) -> Result<Committed<Vec<PhotoId>>> {
         // Forgotten first: once removed, their ids can be reused, so their
         // previews must go even if removing or reading the catalog again
-        // fails. Copies of these photos are kept with them.
+        // fails. Copies of these photos are kept with them. What was read of
+        // batches to stack too: read again once they are gone.
+        self.import_bursts = None;
         let going: Vec<PhotoId> = self
             .session
             .photos
@@ -1144,7 +1185,14 @@ impl Library {
             .flatten()
             .any(|f| folders.contains(&f));
         let ids: Vec<FolderId> = folders.iter().copied().collect();
-        let removed = self.session.remove_folders(&ids)?;
+        let removed = match self.session.remove_folders(&ids, exported) {
+            Ok(removed) => removed,
+            Err(e) => {
+                // Nothing removed: the reads it stopped go on.
+                self.start_background_reads();
+                return Err(e);
+            }
+        };
         if shown_going {
             self.selected_folders.clear();
             self.filters.folder_scope = None;
@@ -1154,19 +1202,25 @@ impl Library {
         }
         if self.listed_after(&removed.listed, "Folder removed") {
             let n = removed.value.len();
-            self.message = format!(
+            self.messages.done(format!(
                 "Removed {name} and its {n} photo{} from the catalog. The files are still on disk.",
                 if n == 1 { "" } else { "s" }
-            );
+            ));
         } else {
             // The session dropped the removed photos from its lists anyway;
             // what is shown follows them before anything reads those lists.
             self.reloaded();
         }
+        self.start_background_reads();
+        Ok(removed)
+    }
+    /// Starts the background reads again for what is still missing, unless
+    /// suspended: capture times, photo info, bursts to stack and checksums.
+    pub(in crate::app) fn start_background_reads(&mut self) {
         self.start_capture_times();
         self.start_photo_info();
+        self.start_import_stacks();
         self.start_checksums();
-        Ok(removed)
     }
     /// Removes virtual copy `id`; returns its master, which is selected. An
     /// error means the copy is still there.
@@ -1186,7 +1240,8 @@ impl Library {
                 self.show(master);
             }
             if let Some(p) = photo {
-                self.message = format!("Removed {} of {}", p.copy_name, p.filename);
+                self.messages
+                    .done(format!("Removed {} of {}", p.copy_name, p.filename));
             }
         }
         Ok(Committed {
@@ -1235,6 +1290,7 @@ impl Library {
         }
         self.poll_capture_times();
         self.poll_photo_info();
+        self.poll_import_stacks();
         self.poll_checksums();
         self.poll_reread();
         self.cache.poll(ctx);
@@ -1284,6 +1340,16 @@ impl Library {
         &mut self,
         defaults: std::sync::Arc<crate::raw_defaults::DevelopDefaults>,
     ) {
+        self.set_defaults_preserving(defaults, None);
+    }
+
+    /// A manual import may leave the current Develop recipe unchanged. Its
+    /// existing render remains valid; other unedited photos still invalidate.
+    pub(in crate::app) fn set_defaults_preserving(
+        &mut self,
+        defaults: std::sync::Arc<crate::raw_defaults::DevelopDefaults>,
+        current: Option<PhotoId>,
+    ) {
         self.defaults = defaults;
         self.screen.clear();
         // Develop's renders of photos without an edit: back to the embedded
@@ -1291,7 +1357,7 @@ impl Library {
         let unedited: Vec<PhotoId> = self
             .cache
             .edited_ids()
-            .filter(|id| edit_source(&self.session.catalog, *id).is_none())
+            .filter(|id| Some(*id) != current && edit_source(&self.session.catalog, *id).is_none())
             .collect();
         for id in unedited {
             self.cache.forget(id);
@@ -1440,6 +1506,9 @@ mod filter;
 mod filter_bar;
 mod folder_selection;
 mod grid;
+mod import_stacks;
+#[cfg(test)]
+mod import_stacks_tests;
 mod info;
 mod kinetic;
 mod layout;
@@ -1468,18 +1537,7 @@ use thumbnails::thumbnail;
 #[cfg(test)]
 mod tests;
 
-impl Library {
-    /// Shows `message`, with `detail` on hover while it is shown.
-    pub(in crate::app) fn set_message_with_detail(&mut self, message: String, detail: String) {
-        self.message = message.clone();
-        self.message_detail = (message, detail);
-    }
-    /// What the message shown sums up, if it does.
-    pub(in crate::app) fn message_detail(&self) -> Option<&str> {
-        let (message, detail) = &self.message_detail;
-        (*message == self.message && !detail.is_empty()).then_some(detail.as_str())
-    }
-}
+impl Library {}
 
 /// Asks `ctx` for a repaint, for a background read with something to show.
 fn wake(ctx: &egui::Context) -> crate::catalog_session::Wake {

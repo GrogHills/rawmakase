@@ -49,7 +49,7 @@ impl Editor {
         // last saved it.
         match self.flush_by(until) {
             Flushed::Saved => {}
-            Flushed::Failed => eprintln!("{}", self.status),
+            Flushed::Failed => eprintln!("{}", self.messages.line()),
             Flushed::Late => eprintln!("Edits not saved: the catalog did not answer in time"),
         }
         self.remember_place(super::workspace::LayoutEdit::Settled);
@@ -90,6 +90,7 @@ impl Editor {
         ]);
         stopping.extend(self.stand_ins.stop());
         stopping.extend(self.selection.stop());
+        stopping.extend(self.lensfun.stop());
         stopping.extend(self.automation.stop_outputs());
         stopping.extend(self.controls.stop());
         stopping.extend(self.stop_folder_sync());

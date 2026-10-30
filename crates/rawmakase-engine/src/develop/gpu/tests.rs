@@ -2,12 +2,33 @@ use super::*;
 use crate::develop::masks::local::LocalDeltas;
 
 #[test]
-fn windows_leaves_vulkan_out_by_default() {
+fn windows_leaves_vulkan_out_while_directx_works() {
     // Intel's Vulkan driver crashed the app at launch where DirectX 12 worked (#623).
-    let windows = default_backends(true);
-    assert!(windows.contains(wgpu::Backends::DX12 | wgpu::Backends::GL));
-    assert!(!windows.contains(wgpu::Backends::VULKAN));
-    let elsewhere = default_backends(false);
+    let mut tried = Vec::new();
+    let windows = default_backends(true, |backends| {
+        tried.push(backends);
+        true
+    });
+    assert_eq!(windows, wgpu::Backends::DX12 | wgpu::Backends::GL);
+    assert_eq!(tried, [wgpu::Backends::DX12]);
+}
+
+#[test]
+fn windows_moves_on_from_a_backend_whose_device_fails() {
+    // A driver refusing DirectX 12's device ended the app at launch (#768).
+    use wgpu::Backends;
+    let chosen = |working: Backends| default_backends(true, |backends| working.contains(backends));
+    assert_eq!(
+        chosen(Backends::VULKAN | Backends::GL),
+        Backends::VULKAN | Backends::GL
+    );
+    assert_eq!(chosen(Backends::GL), Backends::GL);
+    assert_eq!(chosen(Backends::empty()), Backends::DX12 | Backends::GL);
+}
+
+#[test]
+fn other_systems_keep_their_backends_without_trying_them() {
+    let elsewhere = default_backends(false, |_| panic!("tried a device"));
     assert!(elsewhere.contains(wgpu::Backends::VULKAN | wgpu::Backends::METAL));
 }
 
@@ -1591,9 +1612,68 @@ fn installed_zoom_profile_cpu_gpu_agree() -> Result<()> {
     Ok(())
 }
 
+/// A Lensfun-style correction (see `optics::lensfun`): tables of more knots than the
+/// 64 the GPU search once allowed, and lateral CA as a function of green's source
+/// radius, render alike on the CPU and the GPU at Distortion amounts 0, 100% and
+/// 200%.
+#[test]
+#[ignore = "Requires a hardware compute adapter; run explicitly on supported machines"]
+fn long_tables_and_source_radius_aberration_match_cpu() -> Result<()> {
+    use crate::{
+        camera_data::Metadata,
+        optics::{LensCorrection, Radial},
+    };
+    let n = crate::optics::Radial::MAX_KNOTS - 3;
+    let table = |f: &dyn Fn(f32) -> f32| {
+        // Uneven spacing, denser at the corners, as Lensfun's tables are sampled.
+        let knots: Vec<f32> = (0..n)
+            .map(|i| 1.3 * (i as f32 / (n - 1) as f32).sqrt())
+            .collect();
+        Radial {
+            values: knots.iter().map(|r| f(*r)).collect(),
+            knots,
+        }
+    };
+    let lens = LensCorrection {
+        source: "Lensfun: synthetic".into(),
+        distortion: Some(table(&|r| 1. - 0.06 * r * r + 0.02 * r.powi(3))),
+        chromatic: Some([
+            table(&|r| 1.0004 + 0.0008 * r * r),
+            table(&|r| 0.9996 - 0.0006 * r),
+        ]),
+        chromatic_at_source: true,
+        vignetting: Some(table(&|r| 1. / (1. - 0.4 * r * r + 0.1 * r.powi(4)))),
+        ..Default::default()
+    };
+    assert!(lens.validate());
+    for amount in [0., 1., 2.] {
+        let metadata = Metadata {
+            make: "Synthetic".into(),
+            width: 150,
+            height: 100,
+            lens: Some(lens.clone()),
+            ..Default::default()
+        };
+        check_lens_render(metadata, None, &|r: &mut Recipe| {
+            r.lens_builtin = true;
+            r.lens_profile = false;
+            r.lens_distortion = amount;
+        })?;
+    }
+    Ok(())
+}
+
 fn check_imported_profile_render(
+    metadata: crate::camera_data::Metadata,
+    oracle: Option<crate::optics::LensCorrection>,
+) -> Result<()> {
+    check_lens_render(metadata, oracle, &|_| {})
+}
+
+fn check_lens_render(
     mut metadata: crate::camera_data::Metadata,
     oracle: Option<crate::optics::LensCorrection>,
+    tweak: &dyn Fn(&mut Recipe),
 ) -> Result<()> {
     use crate::{
         camera_data::CameraImage,
@@ -1604,7 +1684,7 @@ fn check_imported_profile_render(
     metadata.daylight_wb = [1.; 3];
     metadata.cam_xyz = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]];
     let (w, h) = (metadata.width, metadata.height);
-    let recipe = Recipe {
+    let mut recipe = Recipe {
         profile: Some(std::sync::Arc::new(
             CameraProfile::camera_matrix_default(&metadata)
                 .unwrap()
@@ -1617,6 +1697,7 @@ fn check_imported_profile_render(
         },
         ..Default::default()
     };
+    tweak(&mut recipe);
     assert!(
         recipe.lens_correction(&metadata).is_some(),
         "profile must be active"

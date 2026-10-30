@@ -22,7 +22,7 @@ pub use rawmakase_export::{export, watermark};
 // RAW decoding, colour management, demosaicing, opening and decoding a photo
 // (crates/rawmakase-decode).
 pub use rawmakase_decode::{
-    color_management, decode_cache, decode_dump, fingerprint, half_check, photo, raw,
+    camera_look, color_management, decode_cache, decode_dump, fingerprint, half_check, photo, raw,
 };
 pub(crate) use rawmakase_decode::{decode, raster};
 // File formats and presets over the model (crates/rawmakase-interop).
@@ -37,6 +37,7 @@ pub(crate) mod catalog_session;
 pub mod comparison;
 pub mod diagnostics;
 pub(crate) mod edit_session;
+pub mod lensfun_install;
 pub(crate) mod platform;
 /// For headless commands: whether a path's volume is mounted.
 pub use platform::volume::mounted as volume_mounted;

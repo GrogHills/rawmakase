@@ -133,7 +133,12 @@ impl Editor {
         Some(Wanted {
             photo,
             path,
-            identity: super::preview_build::identity(&record, &self.raw_defaults, self.demosaic),
+            identity: super::preview_build::identity(
+                &record,
+                &self.raw_defaults,
+                &self.profile_library,
+                self.demosaic,
+            ),
             monitor: self.view.display_profile(),
         })
     }

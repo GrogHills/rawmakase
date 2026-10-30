@@ -119,11 +119,37 @@ pub(super) fn look_element(r: &Recipe) -> Option<String> {
 /// when the photo is known, else the one the edit names.
 fn lens_profile(s: &mut Settings, r: &Recipe, m: Option<&Metadata>) {
     let choice = &r.lens_profile_choice;
+    // A Lensfun lens: Lightroom gets Auto, its own profile for the lens if it has
+    // one, and RAWmakase the lens's identity (never its calibration).
+    if let Some(lensfun) = choice.lensfun() {
+        s.text(
+            "LensProfileSetup",
+            crate::lens::choice::LensProfileSetup::Auto.xmp(),
+        );
+        let l = &lensfun.lens;
+        s.text("rawmakase:LensfunMaker", l.maker.clone());
+        s.text("rawmakase:LensfunModel", l.model.clone());
+        if !l.mounts.is_empty() {
+            s.text("rawmakase:LensfunMounts", l.mounts.join(";"));
+        }
+        s.text("rawmakase:LensfunCrop", l.crop.to_string());
+        s.text("rawmakase:LensfunAspect", l.aspect.to_string());
+        if !lensfun.label.is_empty() {
+            s.text("rawmakase:LensfunName", lensfun.label.clone());
+        }
+        if lensfun.provenance.database > 0 {
+            s.text(
+                "rawmakase:LensfunDatabase",
+                lensfun.provenance.database.to_string(),
+            );
+        }
+        return;
+    }
     s.text("LensProfileSetup", choice.setup.xmp());
     let resolved = m.map(|m| r.lens_profile_in_use(m));
     let in_use = resolved.as_ref().and_then(|r| r.used);
     let missing = resolved.as_ref().is_some_and(|r| r.missing.is_some());
-    let id = match (in_use, &choice.id) {
+    let id = match (in_use, choice.adobe()) {
         // A profile the edit names that isn't imported stays named, so the edit
         // finds it again once it is; the digest the edit recorded still describes
         // the same file.
@@ -172,6 +198,12 @@ pub(super) fn settings(r: &Recipe, shown: &Metadata, photo: Option<Frame<'_>>) -
             None => &profile.name,
         };
         s.text("CameraProfile", name.clone());
+        if crate::camera_profiles::fitted::is_fitted(profile) {
+            s.text(
+                super::FITTED_PROFILE_KEY,
+                crate::camera_profiles::fitted::carried(profile),
+            );
+        }
     }
     // A rendered file's white balance is Lightroom's relative Temp and Tint; only
     // its recipes carry the Embedded profile, so this holds without the photo.
@@ -672,7 +704,7 @@ pub fn packet(r: &Recipe, m: &Metadata, photo: &Photo) -> String {
             )
             .0
             .into_iter()
-            .map(|(k, v)| (format!("crs:{k}"), v)),
+            .map(|(k, v)| (super::qualified(&k), v)),
         );
         attributes.push(("crs:AlreadyApplied".into(), "True".into()));
     }
@@ -684,7 +716,8 @@ pub fn packet(r: &Recipe, m: &Metadata, photo: &Photo) -> String {
          xmlns:xmpMM=\"{XMP_MM}\"\n    \
          xmlns:dc=\"{DC}\"\n    \
          xmlns:lr=\"{LR}\"\n    \
-         xmlns:crs=\"{CRS}\""
+         xmlns:crs=\"{CRS}\"{}",
+        super::rawmakase_namespace(attributes.iter().map(|(k, _)| k.as_str()))
     );
     for (key, value) in &attributes {
         let _ = write!(out, "\n   {key}=\"{}\"", escape_text(value));

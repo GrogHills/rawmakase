@@ -4,22 +4,28 @@ mod backfill;
 pub(crate) mod background;
 mod checksums;
 mod descriptive;
+mod import_stacks;
 mod stacks;
 
 use crate::catalog::{
     Catalog, CatalogLocation, Collection, CollectionId, Folder, FolderId, Photo, PhotoId, RootId,
 };
 use anyhow::Result;
+pub(crate) use backfill::{
+    capture_time as file_capture_time, read_info as file_photo_info, read_sequence as file_sequence,
+};
 /// A file's photo info as the catalog reads it for photos added from
 /// folders; export names read a photo's without a catalog the same way.
-pub(crate) use backfill::{capture_time as file_capture_time, read_info as file_photo_info};
+pub(crate) use import_stacks::{BurstRead, BurstsRead};
 
 /// What photos added from folders get where their files have none: the
 /// Preferences' Creator and Copyright, giving way to the camera's own,
 /// which the RAW decoders also find in a CR3, MRW or X3F, and to a CR3's
-/// own XMP, which they find too.
+/// own XMP, which they find too; with the Preferences' other choices for
+/// photos added (Stack Camera Bursts), read once, when adding starts.
 pub(crate) fn new_photo_defaults() -> crate::catalog::NewPhotoDefaults {
     photo_defaults(crate::catalog::MetadataDefaults::load())
+        .with_options(crate::catalog::ImportOptions::load())
 }
 fn photo_defaults(metadata: crate::catalog::MetadataDefaults) -> crate::catalog::NewPhotoDefaults {
     crate::catalog::NewPhotoDefaults::new(
@@ -335,6 +341,12 @@ mod tests {
         }
         let info = session.catalog.photo_info(b)?.expect("read from the file");
         assert_eq!(info.dimensions, Some((6, 4)));
+        // Its sequence is read in the same pass, so Auto-Stack opens no
+        // file of it: it says nothing. a's info is left for later (no image
+        // to size), and so is its sequence.
+        let sequences = session.catalog.sequences()?;
+        assert_eq!(sequences.keys().collect::<Vec<_>>(), [&b]);
+        assert_eq!(sequences[&b].sequence, None);
         session.reload()?;
         let captured = |id| {
             session

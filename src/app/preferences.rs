@@ -74,6 +74,8 @@ pub(super) struct Preferences {
     usage: Usage,
     /// Measured with a file dialog open, so its import is counted on close.
     stale: bool,
+    /// Remove was clicked for Lensfun's profiles, waiting for the confirmation.
+    lensfun_remove: bool,
     /// The status line when the window opened; only later messages are shown.
     status_at_open: String,
     /// Default Creator and Copyright for photos added from folders, as typed.
@@ -83,6 +85,9 @@ pub(super) struct Preferences {
     defaults_dirty: bool,
     /// Saving failed; tried again after the next edit, not every frame.
     defaults_failed: bool,
+    /// What is done with photos added from folders (Stack Camera Bursts),
+    /// saved as it is changed.
+    import: crate::catalog::ImportOptions,
     /// Raw Defaults' camera rows.
     pub(super) raw_defaults: super::raw_defaults::Form,
     /// Folder locations, read when the Catalog page first shows.
@@ -152,11 +157,12 @@ impl Editor {
     pub(super) fn open_preferences(&mut self, tab: Tab) {
         self.preferences.open = true;
         self.preferences.tab = tab;
-        self.preferences.status_at_open = self.status.clone();
+        self.preferences.status_at_open = self.messages.line().to_string();
         // Edits not saved yet are kept, not replaced by the file's.
         if !self.preferences.defaults_dirty {
             self.preferences.defaults = crate::catalog::MetadataDefaults::load();
         }
+        self.preferences.import = crate::catalog::ImportOptions::load();
         self.measure_usage();
         self.measure_raw_defaults();
     }
@@ -202,7 +208,8 @@ impl Editor {
             Ok(()) => self.preferences.defaults_dirty = false,
             Err(e) => {
                 self.preferences.defaults_failed = true;
-                self.status = format!("Metadata defaults not saved: {e:#}");
+                self.messages
+                    .fail(format!("Metadata defaults not saved: {e:#}"));
             }
         }
     }
@@ -305,11 +312,12 @@ impl Editor {
                 bar.spacing_mut().button_padding = button::DIALOG;
                 let done = primary_button(&mut bar, "Done").clicked();
                 // Only what happened while the window was open, e.g. an import.
-                if self.status != self.preferences.status_at_open {
+                // The bar is behind this window, so a problem is said here too.
+                if self.messages.line() != self.preferences.status_at_open {
                     bar.add_space(space::XL);
                     bar.add(
                         egui::Label::new(
-                            egui::RichText::new(&self.status)
+                            egui::RichText::new(self.messages.line())
                                 .size(text::LABEL)
                                 .color(palette.tone(Tone::SECONDARY)),
                         )
@@ -563,11 +571,12 @@ impl Editor {
         });
         if let Some(kind) = clear {
             self.clear_previews(kind);
-            self.status = match kind {
+            let text: String = match kind {
                 PreviewKind::Standard => "Standard previews cleared",
                 PreviewKind::OneToOne => "1:1 previews cleared",
             }
             .into();
+            self.messages.done(text);
             self.preferences.usage.preview_kinds = preview_kinds.map(|kinds| match kind {
                 PreviewKind::Standard => crate::catalog::preview_cache::PreviewUsage {
                     standard: 0,
@@ -642,6 +651,26 @@ impl Editor {
             self.save_defaults();
         }
         gap(ui);
+        group(ui, "Adding photos");
+        let import = &mut self.preferences.import;
+        form_row(ui, "", |ui| {
+            if ui
+                .checkbox(&mut import.stack_bursts, "Stack camera bursts")
+                .changed()
+                && let Err(e) = import.save()
+            {
+                self.messages.fail(format!("Preferences not saved: {e:#}"));
+            }
+        });
+        form_row(ui, "", |ui| {
+            hint(
+                ui,
+                "For photos added from folders or by Synchronize Folder: once their files are \
+                 read, each burst or bracket their camera numbered or shot in continuous drive \
+                 becomes a stack. Photos whose camera says nothing are left alone.",
+            );
+        });
+        gap(ui);
         group(ui, "Catalogs");
         form_row(ui, "", |ui| {
             for (kind, label) in [
@@ -714,6 +743,8 @@ impl Editor {
             reveal_button(ui, &lens_profiles_dir());
         });
         gap(ui);
+        self.lensfun_block(ui);
+        gap(ui);
         group(ui, "Develop presets");
         form_row(ui, "Installed", |ui| {
             value(ui, &plural(presets, "preset", "presets"));
@@ -737,6 +768,125 @@ impl Editor {
         if luts {
             self.open_lut_import();
             self.preferences.stale = true;
+        }
+    }
+
+    /// Lensfun's community lens profiles: installed or not, checking for and
+    /// installing a newer database, removing it, and Lens Corrections' suggestions.
+    fn lensfun_block(&mut self, ui: &mut egui::Ui) {
+        use crate::app::lensfun::Job;
+        group(ui, "Lensfun profiles");
+        let installed = self.lensfun.installed();
+        let running = self.lensfun.running();
+        let mut start = None;
+        form_row(ui, "Installed", |ui| match &installed {
+            Some(m) => value(
+                ui,
+                &format!(
+                    "Version {} · {}",
+                    m.date(),
+                    plural(m.lenses, "lens", "lenses")
+                ),
+            ),
+            None => value(ui, "Not installed"),
+        });
+        if let Some(job) = running {
+            form_row(ui, "", |ui| {
+                match (job, self.lensfun.progress()) {
+                    (Job::Install, Some((done, total))) if total > 0 => {
+                        ui.add(
+                            egui::ProgressBar::new(done as f32 / total as f32)
+                                .desired_width(160.)
+                                .text(format!("{:.1} MB", done as f32 / 1e6)),
+                        );
+                    }
+                    _ => {
+                        crate::app::widgets::spinner(ui, 14.);
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    self.lensfun.cancel();
+                }
+            });
+        } else if installed.is_none() {
+            form_row(ui, "", |ui| {
+                if ui
+                    .button(format!(
+                        "Download ({:.1} MB)",
+                        crate::lensfun_install::ABOUT_MEGABYTES
+                    ))
+                    .clicked()
+                {
+                    start = Some(Job::Install);
+                }
+            });
+        } else if self.preferences.lensfun_remove {
+            form_row(ui, "", |ui| {
+                hint(
+                    ui,
+                    "Remove Lensfun profiles? Edits that use a Lensfun lens keep their corrections.",
+                );
+            });
+            form_row(ui, "", |ui| {
+                if ui.button("Remove").clicked() {
+                    start = Some(Job::Remove);
+                    self.preferences.lensfun_remove = false;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.preferences.lensfun_remove = false;
+                }
+            });
+        } else {
+            form_row(ui, "", |ui| {
+                match self.lensfun.newer() {
+                    Some(newer) => {
+                        let [y, m, d, ..] = crate::time::utc(newer);
+                        if ui
+                            .button(format!("Update to {y:04}-{m:02}-{d:02}"))
+                            .clicked()
+                        {
+                            start = Some(Job::Install);
+                        }
+                    }
+                    None => {
+                        if ui.button("Check for Updates").clicked() {
+                            start = Some(Job::Check);
+                        }
+                    }
+                }
+                if ui.button("Remove…").clicked() {
+                    self.preferences.lensfun_remove = true;
+                }
+                reveal_button(ui, &self.lensfun.dir());
+            });
+            if self.lensfun.up_to_date() {
+                form_row(ui, "", |ui| hint(ui, "Up to date"));
+            }
+        }
+        for job in [Job::Install, Job::Check, Job::Remove] {
+            if let Some(why) = self.lensfun.failure(job) {
+                form_row(ui, "", |ui| hint(ui, why));
+            }
+        }
+        form_row(ui, "", |ui| {
+            let mut suggest = self.lensfun.suggest;
+            if ui
+                .checkbox(&mut suggest, "Suggest Lensfun profiles in Lens Corrections")
+                .changed()
+            {
+                self.lensfun.suggest = suggest;
+                let _ = self.save_session();
+            }
+        });
+        form_row(ui, "", |ui| {
+            hint(
+                ui,
+                "Community lens profiles, downloaded from Lensfun on request; never applied unless you choose one. Edits keep a copy of the calibration they use.",
+            );
+        });
+        form_row(ui, "", crate::app::inspector::lensfun_terms);
+        if let Some(job) = start {
+            self.lensfun.start(job, self.tx.clone(), ui.ctx().clone());
         }
     }
 
@@ -789,10 +939,10 @@ impl Editor {
         });
         if purge {
             let removed = self.decode_cache.purge();
-            self.status = format!(
+            self.messages.done(format!(
                 "Purged {} from the cache",
                 plural(removed, "photo", "photos")
-            );
+            ));
             self.measure_usage();
         }
         if choose {
@@ -809,11 +959,13 @@ impl Editor {
         let removed = match self.decode_cache.relocate(folder.as_deref()) {
             Ok(removed) => removed,
             Err(e) => {
-                self.status = format!("The cache can't be moved there: {e}");
+                self.messages
+                    .fail(format!("The cache can't be moved there: {e}"));
                 return;
             }
         };
-        self.status = match self.save_session() {
+        let saved = self.save_session();
+        let moved = match &saved {
             Ok(()) if removed > 0 => format!(
                 "Photos are now cached in {}; {} removed from the old location",
                 self.decode_cache.dir().display(),
@@ -825,6 +977,11 @@ impl Editor {
             ),
             Err(e) => format!("Cache folder not saved: {e:#}"),
         };
+        if saved.is_ok() {
+            self.messages.done(moved);
+        } else {
+            self.messages.fail(moved);
+        }
         self.measure_usage();
     }
 
@@ -1103,7 +1260,7 @@ mod tests {
         let chosen = dir.path().join("other drive");
         std::fs::create_dir(&chosen).unwrap();
         e.move_decode_cache(Some(chosen.clone()));
-        assert!(!entry.exists(), "{}", e.status);
+        assert!(!entry.exists(), "{}", e.messages.line());
         assert_eq!(
             worker.dir(),
             chosen.join(crate::decode_cache::CHOSEN_SUBFOLDER)
@@ -1141,7 +1298,11 @@ mod tests {
         e.decode_cache.set_folder(Some(&current));
         e.move_decode_cache(Some(dir.path().join("missing")));
         assert_eq!(e.decode_cache.folder(), Some(current));
-        assert!(e.status.contains("can't be moved"), "{}", e.status);
+        assert!(
+            e.messages.line().contains("can't be moved"),
+            "{}",
+            e.messages.line()
+        );
     }
 
     #[test]

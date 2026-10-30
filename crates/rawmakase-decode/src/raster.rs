@@ -371,6 +371,49 @@ fn linear_pro_photo() -> ColorProfile {
     linear_pro
 }
 
+/// The colour space an embedded preview is in.
+pub(crate) enum PreviewSpace<'a> {
+    Icc(&'a [u8]),
+    Srgb,
+    AdobeRgb,
+}
+/// An 8-bit RGB `image` in `space` as linear ProPhoto RGB; an ICC profile that does
+/// not parse, is not RGB or has no transform is an error, never taken for sRGB.
+pub(crate) fn rgb8_linear_pro_photo(
+    image: &RgbImage,
+    space: PreviewSpace,
+) -> Result<Vec<[f32; 3]>> {
+    let profile = match space {
+        PreviewSpace::Icc(icc) => {
+            ColorProfile::new_from_slice(icc).map_err(|e| anyhow!("Unreadable ICC profile: {e}"))?
+        }
+        PreviewSpace::Srgb => ColorProfile::new_srgb(),
+        PreviewSpace::AdobeRgb => ColorProfile::new_adobe_rgb(),
+    };
+    anyhow::ensure!(
+        profile.color_space == DataColorSpace::Rgb,
+        "The preview's ICC profile is not RGB"
+    );
+    let transform = profile
+        .create_transform_f32(
+            Layout::Rgb,
+            &linear_pro_photo(),
+            Layout::Rgb,
+            TransformOptions::default(),
+        )
+        .map_err(|e| anyhow!("Could not convert the preview to ProPhoto: {e}"))?;
+    let from: Vec<f32> = image
+        .as_raw()
+        .iter()
+        .map(|v| f32::from(*v) / 255.)
+        .collect();
+    let mut out = vec![[0f32; 3]; image.as_raw().len() / 3];
+    transform
+        .transform(&from, bytemuck::cast_slice_mut(&mut out))
+        .map_err(|e| anyhow!("Could not convert the preview to ProPhoto: {e}"))?;
+    Ok(out)
+}
+
 /// A conversion from a file's profile to linear ProPhoto, in f32.
 struct ToLinear {
     transform: std::sync::Arc<moxcms::TransformF32Executor>,

@@ -71,11 +71,15 @@ pub(crate) fn open(bytes: &[u8], t: TiffFile) -> Result<RawInfo> {
     let strip = (t.base + u64::from(at), u64::from(len));
     let file = crate::io::Bytes::new(bytes, crate::io::Order::Little);
     let jpeg = ljpeg::header(file.slice(strip.0, strip.1)?)?;
-    let notes = t
+    let note = t
         .exif
         .as_ref()
         .and_then(|e| e.entries.get(&37500))
-        .and_then(|e| t.ifd_at(t.offset_of(e)?))
+        .and_then(|e| t.ifd_at(t.offset_of(e)?));
+    let camera_look = note
+        .as_ref()
+        .and_then(|note| crate::vendor::canon::picture_style(&t, note));
+    let notes = note
         .map(|note| crate::vendor::canon::read(&t, &note))
         .unwrap_or_default();
     let per_mcu = jpeg.samples_per_mcu();
@@ -155,6 +159,7 @@ pub(crate) fn open(bytes: &[u8], t: TiffFile) -> Result<RawInfo> {
     } else {
         Variant::Cr2LosslessJpeg
     });
+    info.camera_look = camera_look;
     info.raw_width = width;
     info.raw_height = height;
     info.sraw = sraw.is_some();

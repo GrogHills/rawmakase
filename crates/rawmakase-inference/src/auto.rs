@@ -1,12 +1,11 @@
-//! Automatic Subject and Sky selection from what the models proposed.
+//! Automatic Subject and Sky selection from what the models said.
 //!
 //! Segment Anything 2 answers a prompt with an object's outline but does not know which
-//! object matters; the panoptic model knows where the people, animals and sky are but
-//! draws blobs. Subject keeps the outlines SAM 2 drew that lie inside the people and
-//! animals and fills any gap with the label itself; Sky keeps the outlines the sky label
-//! lies on, down to where the sky ends. Both end with their edges moved onto the photo's.
-//! Everything here is pure: the proposals and the labels come in, coverage in the photo's
-//! frame goes out.
+//! object matters; the panoptic model knows where the people and animals are but draws
+//! blobs. Subject keeps the outlines SAM 2 drew that lie inside the people and animals and
+//! fills any gap with the label itself. Sky is what the sky model says, pixel by pixel.
+//! Both end with their edges moved onto the photo's. Everything here is pure: what the
+//! models said comes in, coverage in the photo's frame goes out.
 use crate::error::InferenceError;
 use crate::panoptic::Instance;
 use crate::process::{Coverage, Point, Prompt, Rect, RgbImage, output_size, resample};
@@ -15,14 +14,6 @@ use crate::refine::{guided, smooth};
 /// Side of the square grid the proposals and the labels live on: the photo
 /// stretched to a square, as the models see it.
 pub const SIDE: usize = 256;
-
-/// One outline SAM 2 drew: a mask on the [`SIDE`] grid and the model's own estimate of
-/// its quality.
-#[derive(Debug, Clone)]
-pub struct Proposal {
-    pub mask: Vec<bool>,
-    pub score: f32,
-}
 
 /// Subject: `mask` (the union of what SAM 2 drew for each person and animal, 0..=1 on
 /// the [`SIDE`] grid) with its edge moved onto the photo's. All zero when it is empty.
@@ -170,84 +161,43 @@ pub fn iou(a: &[bool], b: &[bool]) -> f32 {
     }
 }
 
-/// Points spread over the sky label, to ask SAM 2 for the outlines it lies on.
-pub fn sky_points(sky_label: &[f32]) -> Vec<Point> {
-    const SPREAD: usize = 6;
-    let mut points = Vec::new();
-    for j in 0..SPREAD {
-        for i in 0..SPREAD {
-            let (x, y) = (
-                (i as f32 + 0.5) / SPREAD as f32,
-                (j as f32 + 0.5) / SPREAD as f32,
-            );
-            let at = (y * SIDE as f32) as usize * SIDE + (x * SIDE as f32) as usize;
-            if sky_label.get(at).is_some_and(|s| *s > 0.8) {
-                points.push(Point {
-                    x,
-                    y,
-                    positive: true,
-                });
-            }
-        }
-    }
-    points
-}
+/// Below this fraction of the frame the sky model's answer is taken for no sky: a few
+/// stray pixels are not a selection worth making.
+const SKY_LEAST: f32 = 0.01;
 
-/// Sky: the outlines the panoptic model's sky label lies on, cut where the sky ends.
-/// All zero when there is none.
+/// Sky: `probability`, the sky model's answer (0..=1 at each of `model_width` x
+/// `model_height` pixels), with its edge moved onto the photo's. All zero when it finds
+/// none.
 pub fn sky(
     image: &RgbImage,
-    proposals: &[Proposal],
-    sky_label: &[f32],
+    probability: &[f32],
+    model_width: usize,
+    model_height: usize,
 ) -> Result<Coverage, InferenceError> {
-    check(sky_label.len())?;
+    if probability.len() != model_width * model_height
+        || probability
+            .iter()
+            .any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))
+    {
+        return Err(InferenceError::OutputInvalid(format!(
+            "the sky model's answer has {} values, or values that are not probabilities, \
+             for {model_width}x{model_height}",
+            probability.len()
+        )));
+    }
     let (width, height) = output_size(image);
-    let labelled: Vec<bool> = sky_label.iter().map(|s| *s > 0.5).collect();
-    let cells = labelled.iter().filter(|l| **l).count();
-    if cells < (0.01 * (SIDE * SIDE) as f32) as usize {
+    let sure = probability.iter().filter(|p| **p > 0.5).count();
+    if (sure as f32) < SKY_LEAST * probability.len() as f32 {
         return Ok(empty(width, height));
     }
-    let mut union = vec![false; SIDE * SIDE];
-    for p in proposals {
-        let count = p.mask.iter().filter(|m| **m).count() as f32;
-        if count < 0.005 * (SIDE * SIDE) as f32 {
-            continue;
-        }
-        let sky: f32 = p
-            .mask
-            .iter()
-            .zip(sky_label)
-            .filter(|(m, _)| **m)
-            .map(|(_, s)| *s)
-            .sum();
-        // Mostly sky: a lake that reflects it is not.
-        if sky / count > 0.7 {
-            for (u, m) in union.iter_mut().zip(&p.mask) {
-                *u |= *m;
-            }
-        }
-    }
-    // Where no outline fits, the label itself stands in for it.
-    let covered = union
-        .iter()
-        .zip(&labelled)
-        .filter(|(u, l)| **u && **l)
-        .count();
-    if (covered as f32) < 0.6 * cells as f32 {
-        for (u, l) in union.iter_mut().zip(&labelled) {
-            *u |= *l;
-        }
-    }
-    let union = to_horizon(&union);
+    let whole = Rect {
+        x: 0,
+        y: 0,
+        width: model_width,
+        height: model_height,
+    };
     let guide = luma(image, width, height);
-    let soft = expand(
-        &union
-            .iter()
-            .map(|u| f32::from(u8::from(*u)))
-            .collect::<Vec<_>>(),
-        width,
-        height,
-    );
+    let soft = resample(probability, model_width, whole, width, height);
     let refined = guided(
         &guide,
         &soft,
@@ -318,28 +268,6 @@ fn expand(grid: &[f32], width: usize, height: usize) -> Vec<f32> {
         height: SIDE,
     };
     resample(grid, SIDE, whole, width, height)
-}
-
-/// Keeps each column's sky from the top down to where it stops, bridging gaps of a few
-/// cells (a branch, a wire), so water or a window below the horizon is not sky.
-fn to_horizon(mask: &[bool]) -> Vec<bool> {
-    const GAP: usize = 6;
-    let mut out = vec![false; SIDE * SIDE];
-    for x in 0..SIDE {
-        let mut last = None::<usize>;
-        for y in 0..SIDE {
-            if mask[y * SIDE + x] {
-                last = Some(y);
-                out[y * SIDE + x] = true;
-            } else if last.is_none_or(|l| y - l > GAP) {
-                // Before any sky only the first rows may be missing it.
-                if last.is_some() || y > GAP {
-                    break;
-                }
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -418,16 +346,9 @@ mod tests {
     }
 
     #[test]
-    fn masks_are_compared_by_overlap_and_the_sky_is_sampled_where_it_is() {
+    fn masks_are_compared_by_overlap() {
         assert!((iou(&rect(0, 0, 100, 100), &rect(0, 0, 100, 50)) - 0.5).abs() < 1e-6);
         assert_eq!(iou(&rect(0, 0, 10, 10), &rect(100, 100, 110, 110)), 0.0);
-        let label: Vec<f32> = rect(0, 0, 256, 100)
-            .iter()
-            .map(|m| f32::from(u8::from(*m)))
-            .collect();
-        let points = sky_points(&label);
-        assert!(!points.is_empty() && points.iter().all(|p| p.y < 100. / 256.));
-        assert!(sky_points(&vec![0.0; SIDE * SIDE]).is_empty());
     }
 
     #[test]
@@ -438,98 +359,77 @@ mod tests {
         assert!(subject(&img, &[0.0; 3]).is_err());
     }
 
-    #[test]
-    fn sky_is_the_outline_the_label_lies_on_from_the_top_down_to_the_horizon() {
-        // Sky over a textured ground, with smooth sky-coloured water below it.
-        let img = photo(256, 256, |x, y| match y {
-            0..=99 => [120, 160, 230],
-            100..=149 => [(x * 7 % 60) as u8, (x * 13 % 70) as u8, 30],
-            _ => [110, 150, 220],
-        });
-        // The model labels the sky, and also a patch of the water that reflects it.
-        let label: Vec<f32> = (0..SIDE * SIDE)
-            .map(|i| {
-                f32::from(u8::from(
-                    i / SIDE < 100 || (i / SIDE > 200 && i % SIDE < 40),
-                ))
-            })
-            .collect();
-        let sky_and_water = Proposal {
-            mask: (0..SIDE * SIDE)
-                .map(|i| !(100..150).contains(&(i / SIDE)))
-                .collect(),
-            score: 0.95,
-        };
-        let sky_only = Proposal {
-            mask: rect(0, 0, 256, 100),
-            score: 0.9,
-        };
-        let ground = Proposal {
-            mask: rect(0, 100, 256, 150),
-            score: 0.9,
-        };
-        let cov = sky(&img, &[sky_and_water, sky_only, ground], &label).unwrap();
-        assert!(at(&cov, 0.5, 0.15) > 240);
-        assert!(at(&cov, 0.5, 0.45) < 10, "the ground is not sky");
-        assert!(
-            at(&cov, 0.5, 0.85) < 10,
-            "water below the horizon is not sky"
-        );
+    /// `f(x, y)` over a `w` x `h` model answer, x and y as fractions of the frame.
+    fn answer(w: usize, h: usize, f: impl Fn(f32, f32) -> f32) -> Vec<f32> {
+        (0..w * h)
+            .map(|i| f((i % w) as f32 / w as f32, (i / w) as f32 / h as f32))
+            .collect()
     }
 
     #[test]
-    fn without_a_sky_label_there_is_no_sky() {
-        let hill = photo(
-            256,
-            256,
-            |_, y| if y < 128 { [15, 15, 18] } else { [40, 30, 20] },
-        );
-        let top = Proposal {
-            mask: rect(0, 0, 256, 128),
-            score: 0.9,
-        };
-        assert!(
-            sky(&hill, &[top], &vec![0.0; SIDE * SIDE])
-                .unwrap()
-                .data
-                .iter()
-                .all(|v| *v == 0)
-        );
-        assert!(sky(&hill, &[], &[0.0; 3]).is_err());
-    }
-
-    #[test]
-    fn a_label_stands_in_where_no_outline_fits() {
-        let img = photo(256, 256, |_, y| {
-            if y < 100 {
+    fn sky_is_where_the_model_says_with_its_edge_on_the_photos() {
+        // The horizon is at row 267; the model's answer is a few pixels too low.
+        let img = photo(1024, 683, |_, y| {
+            if y < 267 {
                 [120, 160, 230]
             } else {
-                [20, 90, 30]
+                [40, 70, 30]
             }
         });
-        let label: Vec<f32> = (0..SIDE * SIDE)
-            .map(|i| f32::from(u8::from(i / SIDE < 100)))
-            .collect();
-        let cov = sky(&img, &[], &label).unwrap();
-        assert!(at(&cov, 0.5, 0.2) > 240 && at(&cov, 0.5, 0.7) < 10);
+        let probability = answer(1024, 683, |_, y| if y < 272. / 683. { 0.99 } else { 0.01 });
+        let cov = sky(&img, &probability, 1024, 683).unwrap();
+        assert_eq!((cov.width, cov.height), (1024, 683));
+        assert!(at(&cov, 0.5, 0.1) > 240 && at(&cov, 0.5, 0.8) < 10);
+        // Under the true edge, where the model's answer still says sky, it has moved up.
+        let below = at(&cov, 0.5, 271.5 / 683.);
+        assert!(below < 200, "{below}");
     }
 
     #[test]
-    fn the_horizon_cut_bridges_a_branch_but_not_a_band_of_ground() {
-        let mut mask = rect(0, 0, 256, 60);
-        // A thin branch across the sky.
-        for y in 20..23 {
-            for x in 0..SIDE {
-                mask[y * SIDE + x] = false;
+    fn water_under_the_sky_is_left_out_when_the_model_leaves_it_out() {
+        // Sky-coloured water below a band of ground: nothing here looks at where it lies.
+        let img = photo(640, 480, |_, y| match y {
+            0..=199 => [120, 160, 230],
+            200..=279 => [40, 60, 30],
+            _ => [115, 155, 225],
+        });
+        let probability = answer(640, 480, |_, y| if y < 200. / 480. { 0.99 } else { 0.01 });
+        let cov = sky(&img, &probability, 640, 480).unwrap();
+        assert!(at(&cov, 0.5, 0.2) > 240 && at(&cov, 0.5, 0.8) < 10);
+    }
+
+    #[test]
+    fn sky_below_leaves_along_the_top_is_kept() {
+        let img = photo(640, 480, |_, y| match y {
+            0..=59 => [20, 50, 25],
+            60..=279 => [120, 160, 230],
+            _ => [60, 45, 30],
+        });
+        let probability = answer(640, 480, |_, y| {
+            if (60. / 480.0..280. / 480.).contains(&y) {
+                0.99
+            } else {
+                0.01
             }
-        }
-        // Sky-like water well below the horizon.
-        mask.iter_mut()
-            .skip(120 * SIDE)
-            .take(40 * SIDE)
-            .for_each(|m| *m = true);
-        let cut = to_horizon(&mask);
-        assert!(cut[10 * SIDE + 5] && cut[40 * SIDE + 5] && cut[59 * SIDE + 5]);
-        assert!(!cut[130 * SIDE + 5]);
+        });
+        let cov = sky(&img, &probability, 640, 480).unwrap();
+        assert!(at(&cov, 0.5, 0.3) > 240 && at(&cov, 0.5, 0.05) < 10 && at(&cov, 0.5, 0.8) < 10);
+    }
+
+    #[test]
+    fn no_sky_is_exactly_nothing() {
+        let img = photo(320, 240, |_, _| [90, 90, 90]);
+        let cov = sky(&img, &vec![0.001; 160 * 120], 160, 120).unwrap();
+        assert_eq!((cov.width, cov.height), (320, 240));
+        assert!(cov.data.iter().all(|v| *v == 0));
+    }
+
+    #[test]
+    fn a_sky_answer_of_the_wrong_size_or_with_bad_values_is_refused() {
+        let img = photo(320, 240, |_, _| [90, 90, 90]);
+        assert!(sky(&img, &[0.5; 3], 160, 120).is_err());
+        let mut bad = vec![0.5; 160 * 120];
+        bad[7] = f32::NAN;
+        assert!(sky(&img, &bad, 160, 120).is_err());
     }
 }

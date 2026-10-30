@@ -19,7 +19,7 @@ mod value_tests;
 use super::CatalogLocation;
 use super::value::{FromRow, FromValue, ToValue, ValueRef};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::{path::Path, time::Duration};
 
 pub use sql::assert_shape;
@@ -37,6 +37,16 @@ pub(in crate::catalog) const VERSION: i64 = 3;
 pub(in crate::catalog) const FIRST_VERSION: i64 = 1;
 /// The first version that may hold raster masks.
 pub(in crate::catalog) const RASTER_MASKS: i64 = 2;
+/// The first version that may hold Lensfun lens choices (an edit, a History state or
+/// a snapshot naming a Lensfun lens), which releases before Lensfun would read as an
+/// Adobe profile without a name and save without it. A catalog is raised to it by the
+/// first write that stores one ([`Catalog::write_recipes`]); others stay at
+/// [`VERSION`], which those releases open.
+///
+/// [`Catalog::write_recipes`]: super::Catalog
+pub(in crate::catalog) const LENSFUN: i64 = 4;
+/// The newest version this release opens.
+pub(in crate::catalog) const NEWEST: i64 = LENSFUN;
 /// The newest version the releases before the one engine open.
 #[cfg(test)]
 pub(in crate::catalog) const BEFORE_ONE_ENGINE: i64 = 2;
@@ -92,7 +102,7 @@ impl Db {
         ensure!(
             opens(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-                VERSION
+                NEWEST
             ),
             "Unsupported RAWmakase catalog version; file left unchanged"
         );
@@ -115,20 +125,23 @@ impl Db {
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?)
     }
 
-    /// Upgrades a catalog of an earlier version to the current one, after writing a
-    /// consistent copy of it to `backup` (a path nothing exists at). The copy is
-    /// SQLite's own (`VACUUM INTO`), not a copy of the live file, and is checked
-    /// before the upgrade commits. `migrate` brings the stored rows up to date and
-    /// `then` writes what needed the upgrade, both in the upgrade's transaction:
-    /// when either fails, nothing is changed and the backup stays. On a catalog
-    /// already upgraded, only `then` runs, as a [`write`](Self::write).
+    /// Upgrades a catalog of an earlier version to `target` ([`VERSION`] or
+    /// [`LENSFUN`]), after writing a consistent copy of it to `backup` (a path nothing
+    /// exists at). The copy is SQLite's own (`VACUUM INTO`), not a copy of the live
+    /// file, and is checked before the upgrade commits. `migrate` brings the stored
+    /// rows of a catalog before [`VERSION`] up to date and `then` writes what needed
+    /// the upgrade, both in the upgrade's transaction: when either fails, nothing is
+    /// changed and the backup stays. On a catalog already at `target` or later, only
+    /// `then` runs, as a [`write`](Self::write).
     pub(in crate::catalog) fn upgrade<R>(
         &mut self,
+        target: i64,
         backup: &Path,
         migrate: impl FnOnce(&mut Write<'_>) -> Result<()>,
         then: impl FnOnce(&mut Write<'_>) -> Result<R>,
     ) -> Result<R> {
-        if self.version()? >= VERSION {
+        debug_assert!((VERSION..=NEWEST).contains(&target));
+        if self.version()? >= target {
             return self.write(then);
         }
         let Backend::Sqlite(db) = &mut self.backend;
@@ -137,35 +150,59 @@ impl Db {
             "A backup already exists: {}",
             backup.display()
         );
-        let published = (|| -> Result<()> {
-            // SQLite takes the name as text; a path that is not valid UTF-8 cannot be
-            // passed to it unchanged, and a changed one would put the copy elsewhere.
-            let name = backup
-                .to_str()
-                .context("The catalog's folder name cannot be used for its backup")?;
-            db.execute("VACUUM INTO ?", [name])?;
-            let copy = Connection::open_with_flags(backup, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            ensure!(
-                copy.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))? == "ok"
-                    && copy.query_row("PRAGMA application_id", [], |r| r.get::<_, i64>(0))?
-                        == APPLICATION_ID,
-                "The backup could not be verified"
-            );
-            Ok(())
-        })();
-        if let Err(error) = published {
+        if let Err(error) = copy_into(db, backup) {
             let _ = std::fs::remove_file(backup);
             return Err(error.context("Could not back up the catalog; it was not upgraded"));
         }
         // The upgrade is one immediate transaction that rechecks what it read.
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if tx.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < VERSION {
-            migrate(&mut Write { db: &tx })?;
-            tx.execute_batch(&format!("PRAGMA user_version={VERSION}"))?;
+        let found = tx.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
+        if found < target {
+            if found < VERSION {
+                migrate(&mut Write { db: &tx })?;
+            }
+            tx.execute_batch(&format!("PRAGMA user_version={target}"))?;
         }
         let result = then(&mut Write { db: &tx })?;
         tx.commit()?;
         Ok(result)
+    }
+
+    /// Writes a consistent copy of the catalog, every row and its format as
+    /// they are, to `path` (a path nothing exists at), and checks it. The
+    /// copy is SQLite's own (`VACUUM INTO`), not a copy of the live file.
+    pub(in crate::catalog) fn copy_to(&self, path: &Path) -> Result<()> {
+        ensure!(!path.exists(), "A file already exists: {}", path.display());
+        copy_into(self.connection(), path)
+    }
+
+    /// Rewrites the file without the space deleted rows leave behind, so
+    /// none of their bytes stay in it, then checks it is intact and every
+    /// reference between its rows holds.
+    pub(in crate::catalog) fn compact(&mut self) -> Result<()> {
+        let db = self.connection();
+        db.execute_batch("VACUUM")?;
+        ensure!(self.is_intact()?, "The catalog failed its integrity check");
+        let broken: Option<String> = db
+            .query_row("PRAGMA foreign_key_check", [], |r| r.get(0))
+            .optional()?;
+        ensure!(
+            broken.is_none(),
+            "A row of {} refers to one that is not there",
+            broken.unwrap_or_default()
+        );
+        Ok(())
+    }
+
+    /// The names of the catalog's tables, SQLite's own left out.
+    pub(in crate::catalog) fn table_names(&self) -> Result<Vec<String>> {
+        let mut statement = self.connection().prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
+        )?;
+        let names = statement
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(names)
     }
 
     /// Gives a catalog from an earlier release the tables added since. On
@@ -261,6 +298,24 @@ impl Db {
             }
         }
     }
+}
+
+/// SQLite's consistent copy of `db` at `path`, checked to be an intact catalog.
+fn copy_into(db: &Connection, path: &Path) -> Result<()> {
+    // SQLite takes the name as text; a path that is not valid UTF-8 cannot be
+    // passed to it unchanged, and a changed one would put the copy elsewhere.
+    let name = path
+        .to_str()
+        .context("The folder's name cannot be used for a copy of the catalog")?;
+    db.execute("VACUUM INTO ?", [name])?;
+    let copy = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    ensure!(
+        copy.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))? == "ok"
+            && copy.query_row("PRAGMA application_id", [], |r| r.get::<_, i64>(0))?
+                == APPLICATION_ID,
+        "The copy of the catalog could not be verified"
+    );
+    Ok(())
 }
 
 /// Whether `error` came from the database itself, as a full disk or a lost

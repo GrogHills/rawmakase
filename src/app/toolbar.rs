@@ -45,7 +45,7 @@ impl Editor {
                         self.redo();
                     }
                     toolbar_divider(ui);
-                    let before_only = self.view.compare.before_only();
+                    let before_only = self.view.compare == Compare::BeforeOnly;
                     // Short of room, Before is its icon: the zoom slider keeps its
                     // width on the right.
                     let (label, width) = if ui.available_width() >= NARROW_TOOLBAR {
@@ -159,6 +159,11 @@ impl Editor {
                             let reset = format!("{cmd}{shift}R");
                             if menu_item(ui, "Reset All Settings", &reset, true, false) {
                                 self.reset_settings();
+                                ui.close();
+                            }
+                            let thumbnail = self.view.compare == Compare::CameraThumbnail;
+                            if menu_item(ui, "Camera Thumbnail", "Shift+\\", true, thumbnail) {
+                                self.toggle_camera_thumbnail();
                                 ui.close();
                             }
                             menu_separator(ui);
@@ -345,7 +350,7 @@ impl Editor {
             return;
         };
         if let Some(note) = defaults.note {
-            self.status = note;
+            self.messages.note(note);
         }
         self.document.edit.replace(defaults.recipe);
     }

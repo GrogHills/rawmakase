@@ -2,9 +2,9 @@
 //!
 //! Everything a pre/post-processing step or an installer needs to know about them lives
 //! here; nothing else in the crate hard-codes a size, a tensor name or a normalization
-//! constant. Two models work together: [`SUBJECT`] (Segment Anything 2) draws crisp object
-//! masks and answers clicks, and [`PANOPTIC`] (DETR) says where the photo's people,
-//! animals and sky are.
+//! constant. Two models work together for Subject: [`SUBJECT`] (Segment Anything 2) draws
+//! crisp object masks and answers clicks, and [`PANOPTIC`] (DETR) says where the photo's
+//! people and animals are. Sky is a model of its own, [`SKY`] (UperNet), installed apart.
 
 /// One file of the models, as stored under their folder.
 #[derive(Debug, Clone, Copy)]
@@ -51,8 +51,8 @@ pub struct ModelSpec {
     pub attribution: &'static str,
 }
 
-/// The panoptic model's contract: one graph that labels the photo's people, animals and
-/// sky, at any size.
+/// The panoptic model's contract: one graph that labels the photo's people and animals,
+/// at any size.
 #[derive(Debug, Clone, Copy)]
 pub struct PanopticSpec {
     pub id: &'static str,
@@ -61,10 +61,9 @@ pub struct PanopticSpec {
     pub long_edge: usize,
     pub mean: [f32; 3],
     pub std: [f32; 3],
-    /// Class ids (COCO's) the model labels people and animals with, and its sky.
+    /// Class ids (COCO's) the model labels people and animals with.
     pub people: (usize, usize),
     pub animals: (usize, usize),
-    pub sky: usize,
     /// A query counts as an object when the model is at least this sure of its class.
     pub confidence: f32,
     pub license: &'static str,
@@ -126,7 +125,7 @@ pub const SUBJECT: ModelSpec = ModelSpec {
     mask_size: 256,
     mean: [0.485, 0.456, 0.406],
     std: [0.229, 0.224, 0.225],
-    processing_version: 3,
+    processing_version: 5,
     license: "Apache-2.0 (facebook/sam2.1-hiera-small, weights and code). The ONNX export is \
               the Hugging Face onnx-community's conversion of those weights.",
     attribution: "Segment Anything Model 2 (SAM 2), Ravi et al., Meta AI, 2024, \
@@ -144,8 +143,8 @@ impl PanopticSpec {
 }
 
 /// DETR ResNet-50 panoptic (Facebook AI Research, trained on COCO), in the ONNX export
-/// of Xenova's Transformers.js conversion (half precision). It says where the people,
-/// animals and sky are; SAM 2 draws their outlines.
+/// of Xenova's Transformers.js conversion (half precision). It says where the people and
+/// animals are; SAM 2 draws their outlines.
 pub const PANOPTIC: PanopticSpec = PanopticSpec {
     id: "detr-resnet-50-panoptic",
     file: ModelFile {
@@ -163,7 +162,6 @@ pub const PANOPTIC: PanopticSpec = PanopticSpec {
     std: [0.229, 0.224, 0.225],
     people: (1, 1),
     animals: (16, 25),
-    sky: 187,
     confidence: 0.85,
     license: "Apache-2.0 (facebook/detr-resnet-50-panoptic, trained on COCO). The ONNX export \
               is Xenova's conversion of those weights; its card declares no license of its own.",
@@ -172,7 +170,56 @@ pub const PANOPTIC: PanopticSpec = PanopticSpec {
                   ONNX export by Xenova on Hugging Face.",
 };
 
-/// Every file the selection feature needs, in one folder.
+/// The sky model's contract: one graph from a photo of any size to the probability, at
+/// each of its pixels, that it is sky.
+#[derive(Debug, Clone, Copy)]
+pub struct SkySpec {
+    pub id: &'static str,
+    /// Version of this contract, as [`ModelSpec::version`].
+    pub version: u32,
+    pub file: ModelFile,
+    /// The photo is scaled to this long edge, keeping its proportions.
+    pub long_edge: usize,
+    /// Neither side goes below this: the network halves it five times.
+    pub min_side: usize,
+    pub mean: [f32; 3],
+    pub std: [f32; 3],
+    /// Version of the pre/post-processing code paths, as [`ModelSpec::processing_version`].
+    pub processing_version: u32,
+    pub license: &'static str,
+    pub attribution: &'static str,
+}
+
+/// UperNet with a ConvNeXt base backbone, trained on ADE20K, exported to ONNX by
+/// `scripts/export_upernet_sky.py` from `openmmlab/upernet-convnext-base` with half-precision
+/// weights and its adaptive pooling written so the graph takes any size. There is no upstream
+/// export to fall back on, so both sources are the mirror.
+pub const SKY: SkySpec = SkySpec {
+    id: "upernet-convnext-base",
+    version: 1,
+    file: ModelFile {
+        name: "upernet-convnext-base-sky-fp16.onnx",
+        size_bytes: 242_162_020,
+        sha256: "ed75b2ad81ad209949c9580071ed486a72a423037822a49faa4e98991a43b891",
+        url: SKY_URL,
+        fallback: SKY_URL,
+    },
+    long_edge: 1024,
+    min_side: 64,
+    mean: [0.485, 0.456, 0.406],
+    std: [0.229, 0.224, 0.225],
+    processing_version: 5,
+    license: "MIT (openmmlab/upernet-convnext-base's card). The checkpoint was trained on \
+              ADE20K, whose images MIT offers for non-commercial research and education.",
+    attribution: "UperNet (Xiao et al., 2018) with ConvNeXt (Liu et al., Meta AI, 2022), trained \
+                  on ADE20K (Zhou et al., MIT CSAIL) by OpenMMLab; ONNX export by RAWmakase.",
+};
+
+/// The mirror's commit that added the sky model: later than [`MIRROR`], whose files stay
+/// pinned where they are.
+const SKY_URL: &str = "https://huggingface.co/pch/rawmakase-models/resolve/b727de8d854f7d5c50396323abe1a3b12e743954/upernet-convnext-base/upernet-convnext-base-sky-fp16.onnx";
+
+/// Every file Subject and Background need, in one folder.
 pub fn all_files() -> Vec<ModelFile> {
     SUBJECT
         .files
@@ -185,6 +232,12 @@ pub fn all_files() -> Vec<ModelFile> {
 /// Bytes of [`all_files`].
 pub fn total_bytes() -> u64 {
     all_files().iter().map(|f| f.size_bytes).sum()
+}
+
+/// Every file Sky needs, in a folder of its own: having Subject's models does not oblige
+/// anyone to fetch this one, nor the other way round.
+pub fn sky_files() -> Vec<ModelFile> {
+    vec![SKY.file]
 }
 
 #[cfg(test)]
@@ -211,5 +264,13 @@ mod tests {
         assert!(SUBJECT.files.iter().any(|f| f.name == SUBJECT.encoder_file));
         assert!(SUBJECT.files.iter().any(|f| f.name == SUBJECT.decoder_file));
         assert_eq!(total_bytes(), 184_115_050 + 86_559_030);
+        // Sky is apart: nobody who has Subject's models has to fetch it.
+        assert!(!all_files().iter().any(|f| f.name == SKY.file.name));
+        assert_eq!(SKY.file.sha256.len(), 64);
+        let commit = SKY_URL
+            .strip_prefix("https://huggingface.co/pch/rawmakase-models/resolve/")
+            .and_then(|rest| rest.split('/').next())
+            .unwrap();
+        assert!(commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 }

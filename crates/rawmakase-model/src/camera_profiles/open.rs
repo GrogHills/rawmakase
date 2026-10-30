@@ -99,14 +99,20 @@ const DIMS: [usize; 3] = [72, 8, 8];
 
 /// RAWmakase Standard for this camera, or None without a usable colour matrix.
 pub fn standard(m: &Metadata) -> Option<CameraProfile> {
-    let mut p = CameraProfile::camera_matrix_default(m).or_else(|| {
+    matrix_standard(m).or_else(|| {
         // LibRaw reports no matrix for some DNGs; use the D65 matrix the DNG's own
         // profile carries.
         let embedded = super::builtin(m)?;
         let mut with_matrix = m.clone();
         with_matrix.cam_xyz = embedded.color_matrix(6504.)?;
-        CameraProfile::camera_matrix_default(&with_matrix)
-    })?;
+        matrix_standard(&with_matrix)
+    })
+}
+
+/// RAWmakase Standard from the photo's own colour matrix (`Metadata::cam_xyz`)
+/// alone, never from a DNG's embedded profile.
+pub(super) fn matrix_standard(m: &Metadata) -> Option<CameraProfile> {
+    let mut p = CameraProfile::camera_matrix_default(m)?;
     p.name = STANDARD.into();
     p.copyright = COPYRIGHT.into();
     Some(p)
@@ -118,6 +124,7 @@ pub fn color(m: &Metadata) -> Option<CameraProfile> {
     let mut p = base.clone();
     p.name = COLOR.into();
     p.enhanced = Some(Enhanced {
+        camera_look: None,
         uuid: COLOR_UUID.into(),
         base_name: base.name,
         highlights: 0.,

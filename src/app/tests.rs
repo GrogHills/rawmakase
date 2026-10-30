@@ -1348,7 +1348,7 @@ fn red_eye_tool_adds_moves_and_deletes_one_history_step_each() {
         (
             editor.document.edit.recipe().red_eye.clone(),
             names,
-            editor.status.to_string(),
+            editor.messages.line().to_string(),
         )
     };
     let button = |pos, pressed| egui::Event::PointerButton {
@@ -1490,7 +1490,7 @@ fn pet_eye_type_finds_a_glowing_pupil_and_adds_a_catchlight() {
     // Red Eye finds nothing red there.
     in_edit_frame(&ctx, &mut editor, |e| e.add_red_eye([0.5, 0.5], 0.15));
     assert!(editor.document.edit.recipe().red_eye.is_empty());
-    assert!(editor.status.contains("Unable to find red eye"));
+    assert!(editor.messages.line().contains("Unable to find red eye"));
     editor.view.red_eye.pet = red_eye_tool::PupilType::Pet;
     in_edit_frame(&ctx, &mut editor, |e| e.add_red_eye([0.5, 0.5], 0.15));
     let eyes = &editor.document.edit.recipe().red_eye;
@@ -1588,9 +1588,9 @@ fn red_eye_tool_refuses_a_red_area_too_large_to_be_a_pupil() {
     in_edit_frame(&ctx, &mut editor, |e| e.add_red_eye([0.5, 0.5], 0.48));
     assert!(editor.document.edit.recipe().red_eye.is_empty());
     assert!(
-        editor.status.contains("Unable to find red eye"),
+        editor.messages.line().contains("Unable to find red eye"),
         "{}",
-        editor.status
+        editor.messages.line()
     );
     editor.document.edit.recipe().validate().unwrap();
 }
@@ -2358,7 +2358,7 @@ fn dropping_a_relocated_folders_parent_does_not_select_its_logical_siblings() ->
         library.source_key(),
         library.session.roots,
         library.session.folders,
-        editor.status
+        editor.messages.line()
     );
     Ok(())
 }
@@ -2492,9 +2492,9 @@ fn a_dropped_folder_that_fails_leaves_the_others_added() -> anyhow::Result<()> {
     let names: Vec<_> = library.session.photos.iter().map(|p| &p.filename).collect();
     assert_eq!(names, ["g.ARW"]);
     assert!(
-        editor.status.contains("Not added: locked"),
+        editor.messages.line().contains("Not added: locked"),
         "{}",
-        editor.status
+        editor.messages.line()
     );
     Ok(())
 }
@@ -2542,14 +2542,15 @@ fn removing_a_folder_closes_its_photo_and_leaves_the_files() -> anyhow::Result<(
         folders: trip.clone(),
         photos: 1,
         empty_root: None,
+        exported: None,
     };
     let other = crate::catalog::CatalogLocation::File(dir.path().join("other.rawmakase"));
     editor.remove_folders(&removal(other));
     assert_eq!(editor.library.as_ref().unwrap().session.photos.len(), 2);
     assert!(
-        editor.status.contains("another catalog"),
+        editor.messages.line().contains("another catalog"),
         "{}",
-        editor.status
+        editor.messages.line()
     );
 
     editor.remove_folders(&removal(crate::catalog::CatalogLocation::File(path)));
@@ -2565,7 +2566,11 @@ fn removing_a_folder_closes_its_photo_and_leaves_the_files() -> anyhow::Result<(
     assert_eq!(names, ["home.ARW"]);
     assert_eq!(editor.document.catalog_photo, None);
     assert!(editor.module == Module::Library);
-    assert!(editor.status.contains("still on disk"), "{}", editor.status);
+    assert!(
+        editor.messages.line().contains("still on disk"),
+        "{}",
+        editor.messages.line()
+    );
     // The load's late results are no longer its.
     assert!(!editor.load.is_running());
     assert_ne!(editor.load.id(), loading);
@@ -3161,7 +3166,11 @@ fn auto_runs_again_when_it_failed_on_settings_changed_since() {
         worker::AutoKind::Settings,
         Err("Auto: no usable pixels".into()),
     );
-    assert!(!editor.status.contains("usable"), "{}", editor.status);
+    assert!(
+        !editor.messages.line().contains("usable"),
+        "{}",
+        editor.messages.line()
+    );
     assert!(
         editor.document.auto.is_running(),
         "Auto runs again for the crop"
@@ -3827,7 +3836,7 @@ fn undo_brings_back_a_range_rejected_under_the_unflagged_filter() -> anyhow::Res
     assert_eq!(library.selected(), Some(ids[3]));
     assert_eq!(library.selected_photos(), ids[1..4]);
     assert!(library.session.photos.iter().all(|p| p.flag == 0));
-    assert!(e.status.starts_with("Undo 3 photos"));
+    assert!(e.messages.line().starts_with("Undo 3 photos"));
     e.redo();
     let library = e.library.as_ref().unwrap();
     assert_eq!(library.shown().len(), 2);
@@ -5109,7 +5118,11 @@ fn guided_upright_gestures_are_one_history_step_each() {
     assert_eq!(applied, 4);
     // One guide corrects nothing, and says so.
     assert_eq!(e.document.edit.recipe().upright.correction(), None);
-    assert!(e.status.contains("two or more guides"), "{}", e.status);
+    assert!(
+        e.messages.line().contains("two or more guides"),
+        "{}",
+        e.messages.line()
+    );
     e.undo();
     assert_eq!(e.document.edit.recipe().upright.guides.len(), 2);
     assert!(e.document.edit.recipe().upright.correction().is_some());
@@ -5954,7 +5967,10 @@ fn point_colors_dropper_adds_a_selected_swatch_as_one_step_and_visualizes_it() {
     // The same color again is refused, and changes nothing.
     editor.view.toggle(state::Tool::PointColor);
     sample(&mut editor);
-    assert_eq!(editor.status, SampleRefusal::AlreadySampled.message());
+    assert_eq!(
+        editor.messages.line(),
+        SampleRefusal::AlreadySampled.message()
+    );
     assert_eq!(editor.document.edit.recipe().point_colors.len(), 1);
     // A sample still being taken when the dropper is put away is dropped.
     assert_eq!(editor.view.tool, state::Tool::PointColor);
@@ -6720,6 +6736,22 @@ fn eframes_reason_for_giving_up_is_kept() {
         Some("No suitable GPU adapter")
     );
     assert_eq!(EframeErrors::take(), None);
+
+    // wgpu only logs the driver call behind "Parent device is lost" (#768).
+    record(
+        "wgpu_hal::dx12",
+        log::Level::Error,
+        "Queue creation failed: E_INVALIDARG",
+    );
+    record(
+        "eframe::native::run",
+        log::Level::Error,
+        "Exiting because of error: WGPU error: Parent device is lost",
+    );
+    assert_eq!(
+        EframeErrors::take().as_deref(),
+        Some("WGPU error: Parent device is lost\n\nQueue creation failed: E_INVALIDARG")
+    );
 }
 #[test]
 fn an_imported_value_outside_the_slider_survives_being_shown_and_nudged() {
@@ -7041,7 +7073,7 @@ fn a_copy_removed_when_the_catalog_cannot_be_read_again_still_leaves_undo() -> a
         catalog.photos()?.iter().all(|p| p.id != copy),
         "the copy is removed"
     );
-    let status = editor.status.clone();
+    let status = editor.messages.line().to_string();
     editor
         .library
         .as_mut()
@@ -7137,6 +7169,47 @@ fn a_rating_made_in_develop_on_a_removed_copy_still_undoes_the_photo_it_rated() 
     assert_eq!(rating(&editor, b), 3);
     editor.undo();
     assert_eq!(rating(&editor, b), 2);
+    Ok(())
+}
+/// Issue #746: with Picked shown, U in Develop hides the photo open, and the
+/// arrows only work again once Develop moves to a photo still shown.
+#[test]
+fn unflagging_the_photo_open_in_develop_with_picked_shown_opens_one_still_shown()
+-> anyhow::Result<()> {
+    use crate::app::photo_metadata::Edit;
+    let (_dir, _ctx, mut editor, [a, b]) = two_photo_editor()?;
+    let library = editor.library.as_mut().unwrap();
+    library.edit_photos(&[a, b], Edit::Flag(1), false)?;
+    let mut layout = library.layout();
+    layout.flags = vec![1];
+    layout.filters_off = false;
+    library.apply_layout(&layout);
+    editor.module = Module::Develop;
+    editor.develop_catalog_photo(b);
+    assert_eq!(editor.document.catalog_photo, Some(b));
+    // U, as the Develop shortcut sends it.
+    assert!(editor.command_metadata(Edit::Flag(0), None, false).is_ok());
+    assert_eq!(editor.library.as_ref().unwrap().photo(b).unwrap().flag, 0);
+    assert_eq!(editor.document.catalog_photo, Some(a));
+    assert_eq!(editor.library.as_ref().unwrap().selected(), Some(a));
+    assert_eq!(editor.module, Module::Develop);
+    // The Library moves its selection to B, picked again, but does not
+    // open Develop.
+    editor.module = Module::Library;
+    assert!(
+        editor
+            .command_metadata(Edit::Flag(1), Some(b), false)
+            .is_ok()
+    );
+    editor.library.as_mut().unwrap().make_active(a);
+    assert!(
+        editor
+            .command_metadata(Edit::Flag(0), Some(a), false)
+            .is_ok()
+    );
+    assert_eq!(editor.library.as_ref().unwrap().selected(), Some(b));
+    assert_eq!(editor.module, Module::Library);
+    assert_eq!(editor.document.catalog_photo, Some(a));
     Ok(())
 }
 /// The edit's first save fails after an earlier one succeeded: a quit from the Dock
@@ -7984,7 +8057,7 @@ fn the_library_info_panel_stays_while_a_field_in_it_cannot_be_saved() -> anyhow:
     library.set_copy_name_draft(copy, "B&W");
     assert!(!e.change_panels(PanelChange::Toggle(WorkspacePanel::Right)));
     assert!(e.panel_shown(WorkspacePanel::Right));
-    assert!(e.status.starts_with("Not saved"));
+    assert!(e.messages.line().starts_with("Not saved"));
     // The left panel holds no field; it hides.
     assert!(e.change_panels(PanelChange::Toggle(WorkspacePanel::Left)));
     e.library.as_mut().unwrap().discard_drafts();
@@ -8372,6 +8445,7 @@ fn a_change_still_waiting_for_the_undo_log_forgets_a_removed_folders_photos() ->
         folders,
         photos: 1,
         empty_root: None,
+        exported: None,
     });
     editor.sync_undo();
     // Its id may be the next photo's: nothing may undo onto it.
@@ -8714,7 +8788,7 @@ fn opening_a_jpeg_says_it_is_reading_the_photo() -> anyhow::Result<()> {
     let file = dir.path().join("photo.jpg");
     image::RgbImage::new(8, 8).save(&file)?;
     assert!(editor.load_raw(file, None));
-    assert_eq!(editor.status, "Reading photo…");
+    assert_eq!(editor.messages.line(), "Reading photo…");
     Ok(())
 }
 #[test]
@@ -9004,4 +9078,356 @@ fn a_window_reopened_maximized_keeps_that_until_the_window_manager_maximizes_it(
         assert_eq!(window_frame(&mut e, &ctx, 0.1, true, false), (true, false));
     }
     Ok(())
+}
+
+/// The Lensfun row fits the inspector at its usual width: before and after the
+/// download, its text stays inside the panel, what it says wraps below it, and
+/// nothing reaches past the panel's right edge (which would widen it).
+#[test]
+fn lensfun_row_stays_inside_a_narrow_panel() -> anyhow::Result<()> {
+    const WIDTH: f32 = 320.;
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    ctx.all_styles_mut(|s| s.animation_time = 0.);
+    let dir = tempfile::tempdir()?;
+    let archive =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lensfun/good.tar.bz2");
+    let mut editor =
+        Editor::with_context(&ctx, None, crate::app::session::Session::default(), None);
+    editor.lensfun =
+        crate::app::lensfun::Lensfun::in_folder(dir.path().to_path_buf(), archive.clone());
+    editor.document.metadata = Some(crate::lens::lensfun::fixture::photo());
+    let frame = |editor: &mut Editor| {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(WIDTH, 6000.))),
+                ..Default::default()
+            },
+            |ui| {
+                let frame = editor.begin_edit_frame();
+                egui::CentralPanel::default().show(ui, |ui| editor.controls(ui));
+                editor.finish_edit_frame(frame, ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+        output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility is on")
+    };
+    let find = |tree: &egui::accesskit::TreeUpdate, text: &str| {
+        let nodes: Vec<_> = tree
+            .nodes
+            .iter()
+            .map(|(_, n)| n)
+            .filter(|n| n.bounds().is_some())
+            .collect();
+        nodes
+            .iter()
+            .find(|n| {
+                n.label().is_some_and(|l| l.starts_with(text))
+                    || n.value().is_some_and(|l| l.starts_with(text))
+            })
+            .map(|n| (*n).clone())
+            .unwrap_or_else(|| {
+                let labels: Vec<_> = nodes
+                    .iter()
+                    .filter_map(|n| n.label().or(n.value()))
+                    .collect();
+                panic!("no {text:?} among {labels:?}")
+            })
+    };
+    let inside = |node: &egui::accesskit::Node| {
+        let b = node.bounds().expect("placed");
+        assert!(
+            b.x1 as f32 <= WIDTH + 0.5,
+            "{:?} reaches {} of {WIDTH}",
+            node.label().or(node.value()),
+            b.x1
+        );
+        b
+    };
+    let tree = frame(&mut editor);
+    let row = inside(&find(&tree, "Community lens profiles"));
+    let download = inside(&find(&tree, "Download"));
+    assert!(download.y0 >= row.y1, "the download is below the title");
+    let terms = inside(&find(&tree, "Lensfun database by Lensfun contributors"));
+    assert!(terms.y0 >= download.y1, "the terms are below the download");
+    crate::lensfun_install::install(
+        dir.path(),
+        &crate::lensfun_install::Source::File(archive),
+        &Default::default(),
+    )?;
+    frame(&mut editor);
+    let tree = frame(&mut editor);
+    let lens = inside(&find(&tree, "Canon EF 70-200mm f/2.8L IS II USM"));
+    let gives = inside(&find(&tree, "Corrects "));
+    assert!(gives.y0 >= lens.y1, "what it corrects is below the lens");
+    let use_button = tree
+        .nodes
+        .iter()
+        .map(|(_, n)| n)
+        .find(|n| n.role() == egui::accesskit::Role::Button && n.label() == Some("Use"))
+        .expect("the Use button");
+    let button = inside(use_button);
+    assert!(button.y0 >= gives.y1, "Use is below what it corrects");
+    Ok(())
+}
+
+/// Where no imported profile fits, Lens Corrections offers Lensfun's download, which
+/// only installs; installed, it offers the lens this photo matches, and Use chooses
+/// it, with Enable Profile Corrections, as one History step.
+#[test]
+fn lensfun_is_offered_downloaded_and_used_in_one_step() -> anyhow::Result<()> {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    ctx.all_styles_mut(|s| s.animation_time = 0.);
+    let dir = tempfile::tempdir()?;
+    let archive =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/lensfun/good.tar.bz2");
+    let mut editor =
+        Editor::with_context(&ctx, None, crate::app::session::Session::default(), None);
+    editor.lensfun =
+        crate::app::lensfun::Lensfun::in_folder(dir.path().to_path_buf(), archive.clone());
+    editor.document.metadata = Some(crate::lens::lensfun::fixture::photo());
+    // Tall and wide enough for the whole panel, Lens Corrections being far down.
+    let frame = |editor: &mut Editor, events: Vec<egui::Event>| {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(480., 6000.))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let frame = editor.begin_edit_frame();
+                egui::CentralPanel::default().show(ui, |ui| editor.controls(ui));
+                editor.finish_edit_frame(frame, ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+        output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility is on")
+    };
+    let find = |tree: &egui::accesskit::TreeUpdate, text: &str| {
+        tree.nodes
+            .iter()
+            .map(|(_, n)| n)
+            .find(|n| {
+                n.label().is_some_and(|l| l.contains(text))
+                    || n.value().is_some_and(|v| v.contains(text))
+            })
+            .cloned()
+    };
+    let tree = frame(&mut editor, vec![]);
+    assert!(find(&tree, "Community lens profiles").is_some());
+    assert!(find(&tree, "Download · 0.5 MB").is_some());
+    assert!(find(&tree, "CC BY-SA 3.0").is_some());
+    let before = editor.document.edit.recipe().clone();
+    // The download (an archive here) installs and changes no edit.
+    crate::lensfun_install::install(
+        dir.path(),
+        &crate::lensfun_install::Source::File(archive),
+        &Default::default(),
+    )?;
+    let tree = frame(&mut editor, vec![]);
+    assert_eq!(*editor.document.edit.recipe(), before);
+    assert!(find(&tree, "Canon EF 70-200mm f/2.8L IS II USM").is_some());
+    assert!(find(&tree, "Corrects ").is_some());
+    let steps = editor.document.edit.history().steps().0.len();
+    let use_button = tree
+        .nodes
+        .iter()
+        .map(|(_, n)| n)
+        .find(|n| n.role() == egui::accesskit::Role::Button && n.label() == Some("Use"))
+        .cloned()
+        .expect("the Use button");
+    let [down, up] = press_and_release(centre(&use_button));
+    frame(&mut editor, down);
+    frame(&mut editor, up);
+    frame(&mut editor, vec![]);
+    let r = editor.document.edit.recipe();
+    assert!(r.lens_profile);
+    let chosen = r.lens_profile_choice.lensfun().expect("a Lensfun lens");
+    assert!(chosen.is_resolved());
+    assert_eq!(chosen.lens.model, "Canon EF 70-200mm f/2.8L IS II USM");
+    assert_eq!(editor.document.edit.history().steps().0.len(), steps + 1);
+    assert!(
+        r.lens_correction(editor.document.metadata.as_ref().unwrap())
+            .unwrap()
+            .source
+            .starts_with("Lensfun")
+    );
+    // The menus show it as chosen.
+    let tree = frame(&mut editor, vec![]);
+    assert!(find(&tree, "Lensfun").is_some());
+    // An edit naming the lens only, as read from XMP, resolves on request, as one
+    // step.
+    let named = editor
+        .document
+        .edit
+        .recipe()
+        .lens_profile_choice
+        .lensfun()
+        .unwrap()
+        .clone();
+    editor
+        .document
+        .edit
+        .setup_mut()
+        .lens_profile_choice
+        .choose_lensfun(crate::lens::lensfun::LensfunChoice::unresolved(
+            named.lens.clone(),
+            named.label.clone(),
+            0,
+        ));
+    let tree = frame(&mut editor, vec![]);
+    assert!(find(&tree, "isn't resolved").is_some());
+    let steps = editor.document.edit.history().steps().0.len();
+    let resolve = tree
+        .nodes
+        .iter()
+        .map(|(_, n)| n)
+        .find(|n| n.role() == egui::accesskit::Role::Button && n.label() == Some("Resolve"))
+        .cloned()
+        .expect("the Resolve button");
+    let [down, up] = press_and_release(centre(&resolve));
+    frame(&mut editor, down);
+    frame(&mut editor, up);
+    frame(&mut editor, vec![]);
+    let chosen = editor
+        .document
+        .edit
+        .recipe()
+        .lens_profile_choice
+        .lensfun()
+        .unwrap()
+        .clone();
+    assert!(chosen.is_resolved());
+    assert_eq!(chosen.calibration, named.calibration);
+    assert_eq!(editor.document.edit.history().steps().0.len(), steps + 1);
+    Ok(())
+}
+
+/// A failure said while the Library's own message was showing used to be
+/// hidden by it, and either was gone with the next progress.
+#[test]
+fn a_failed_action_stays_on_screen_past_the_librarys_messages_and_progress() {
+    let ctx = egui::Context::default();
+    let mut e = Editor::with_context(&ctx, None, crate::app::session::Session::default(), None);
+    e.onboarding.visible = false;
+    e.messages
+        .fail("No camera look fitted: The preview does not line up");
+    e.messages.note("Reading RAW…");
+    for time in [0., 3600.] {
+        let input = egui::RawInput {
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| e.draw(ui));
+        output.textures_delta.clear();
+    }
+    assert_eq!(e.messages.line(), "Reading RAW…");
+    assert!(
+        e.messages
+            .has_entry("No camera look fitted: The preview does not line up")
+    );
+}
+
+/// Profile → Fit Camera Look: a refusal (or a panic, which arrives as one) says why
+/// and leaves nothing running; a superseded fit is dropped; the fit is one History
+/// step Undo takes back; a profile chosen while it ran wins over it.
+#[test]
+fn a_fitted_camera_look_is_one_step_and_yields_to_later_choices() {
+    use crate::camera_profiles::fitted;
+    let ctx = egui::Context::default();
+    let mut e = Editor::with_context(&ctx, None, crate::app::session::Session::default(), None);
+    let m = crate::camera_data::Metadata {
+        make: "Test".into(),
+        model: "Camera".into(),
+        cam_xyz: [[0.8, -0.2, -0.1], [-0.3, 1.1, 0.2], [-0.05, 0.15, 0.6]],
+        ..Default::default()
+    };
+    let fit = fitted::with_look(
+        &fitted::standard_base(&m).unwrap(),
+        &fitted::FittedLook::identity(),
+    )
+    .unwrap();
+    e.document.metadata = Some(m.clone());
+    let before = e.document.edit.recipe().profile.clone();
+    let (g, _) = e.document.camera_look.start();
+    e.camera_look_ready(g, before.clone(), Err("Stopped unexpectedly: boom".into()));
+    assert!(!e.document.camera_look.is_running());
+    assert!(e.messages.has_entry_with("boom"));
+    assert!(e.running_work().is_empty());
+    assert_eq!(e.document.edit.history().steps().1, 0);
+    // A fit asked for again: the first one's result no longer counts.
+    let (first, _) = e.document.camera_look.start();
+    let (second, _) = e.document.camera_look.start();
+    e.camera_look_ready(first, before.clone(), Ok(Box::new(fit.clone())));
+    assert_eq!(e.document.edit.recipe().profile, before);
+    assert!(e.document.camera_look.is_running());
+    assert_eq!(e.running_work()[0].key, "camera look");
+    e.camera_look_ready(second, before.clone(), Ok(Box::new(fit.clone())));
+    assert_eq!(e.document.edit.recipe().profile.as_deref(), Some(&fit));
+    assert_eq!(e.document.edit.recipe().profile_amount, 1.);
+    // Temp and Tint follow the new profile, as after a menu choice.
+    let mut synced = e.document.edit.recipe().clone();
+    synced.profile_changed(&m);
+    assert_eq!(
+        (synced.temperature, synced.tint, synced.wb),
+        (
+            e.document.edit.recipe().temperature,
+            e.document.edit.recipe().tint,
+            e.document.edit.recipe().wb
+        )
+    );
+    let (steps, applied) = e.document.edit.history().steps();
+    assert_eq!((applied, steps[0].name.as_str()), (1, "Fit Camera Look"));
+    e.undo();
+    assert_eq!(e.document.edit.recipe().profile, before);
+    // Another profile chosen while it ran: that choice stays.
+    let (g, _) = e.document.camera_look.start();
+    let chosen = Some(std::sync::Arc::new(fitted::standard_base(&m).unwrap()));
+    e.document.edit.setup_mut().profile = chosen.clone();
+    e.camera_look_ready(g, before, Ok(Box::new(fit)));
+    assert_eq!(e.document.edit.recipe().profile, chosen);
+    assert!(e.messages.has_entry_with("changed"));
+    assert!(!e.document.camera_look.is_running());
+}
+
+/// Listing a photo's profiles again after an import keeps the fitted default of a
+/// photo still without colour data, and drops it once an imported profile fits.
+#[test]
+fn an_import_keeps_a_fitted_default_until_a_profile_fits() {
+    use crate::camera_profiles::fitted;
+    let m = crate::camera_data::Metadata {
+        make: "Test".into(),
+        model: "Bare".into(),
+        ..Default::default()
+    };
+    let with_matrix = crate::camera_data::Metadata {
+        cam_xyz: [[0.8, -0.2, -0.1], [-0.3, 1.1, 0.2], [-0.05, 0.15, 0.6]],
+        ..m.clone()
+    };
+    let fit = std::sync::Arc::new(
+        fitted::with_look(
+            &fitted::standard_base(&with_matrix).unwrap(),
+            &fitted::FittedLook::identity(),
+        )
+        .unwrap(),
+    );
+    let had = vec![fit];
+    assert_eq!(
+        super::camera_look::keep_fitted_default(&had, &m, vec![]),
+        had
+    );
+    let mut dcp = fitted::standard_base(&with_matrix).unwrap();
+    dcp.name = "Mine".into();
+    let imported = vec![std::sync::Arc::new(dcp)];
+    assert_eq!(
+        super::camera_look::keep_fitted_default(&had, &m, imported.clone()),
+        imported
+    );
 }

@@ -22,6 +22,9 @@ use crate::{app::theme, develop::targeted::Target};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 
 mod lens_profile;
+mod lensfun;
+/// Lensfun's terms, for Preferences.
+pub(super) use lensfun::terms as lensfun_terms;
 mod profile_menu;
 
 /// A histogram corner's clipping triangle: its corner point, which way it
@@ -432,6 +435,18 @@ impl Editor {
         ui.add_space(space::S);
         let mut import_profiles = false;
         let mut import_lens = false;
+        // Lensfun's database as the Lens Corrections panel shows it this frame.
+        let lensfun_view = lensfun::View {
+            db: self.lensfun.database(),
+            running: self.lensfun.running(),
+            progress: self.lensfun.progress(),
+            failure: self
+                .lensfun
+                .failure(crate::app::lensfun::Job::Install)
+                .map(str::to_string),
+            suggest: self.lensfun.suggest,
+        };
+        let mut lensfun_action = None;
         let mut import_folder = None;
         let mut import_luts = false;
         let mut import_adobe = false;
@@ -465,6 +480,8 @@ impl Editor {
         let mut upright_request = false;
         let mut guided_action = None;
         let mut treatment_request = None;
+        let mut fit_camera_look = false;
+        let can_fit_camera_look = self.can_fit_camera_look();
         let mut auto_mix_request = false;
         let mut profile_changed_from = None;
         // A conversion to black & white waiting for the photo to decode.
@@ -581,6 +598,15 @@ impl Editor {
                             .clicked()
                         {
                             import_luts = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .add_enabled(can_fit_camera_look, egui::Button::new("Fit Camera Look"))
+                            .on_hover_text("Fits a look to this photo's own JPEG preview, the camera's rendering of it, and uses it as the profile: Camera Look (fitted). It is saved with the edit; fitting again makes a new one.")
+                            .clicked()
+                        {
+                            fit_camera_look = true;
                             ui.close();
                         }
                     });
@@ -723,9 +749,20 @@ impl Editor {
                             } else {
                                 &NamedWhiteBalance::ALL[..]
                             };
+                            // A fitted matrix base reads As Shot as D65 whatever the
+                            // light: its temperatures are relative, so named whites
+                            // would be wrong (imported XMP keeps them as written).
+                            let uncalibrated = r
+                                .profile
+                                .as_ref()
+                                .is_some_and(|p| crate::camera_profiles::fitted::is_uncalibrated_base(p));
                             for &named in named {
                                 if ui
-                                    .selectable_label(selected == named.name(), named.name())
+                                    .add_enabled(
+                                        !uncalibrated,
+                                        egui::Button::selectable(selected == named.name(), named.name()),
+                                    )
+                                    .on_disabled_hover_text("This photo has no colour data of its own: its Camera Look (fitted) knows the white as shot, not the light's temperature. As Shot, Auto, the selector and Temp and Tint still work.")
                                     .clicked()
                                     && let Some(m) = &metadata
                                 {
@@ -1242,7 +1279,7 @@ impl Editor {
                         .color(palette.tone(Tone::SOFT)),
                 );
             });
-            lens_profile::profile_menus(ui, r, metadata.as_ref());
+            lens_profile::profile_menus(ui, r, metadata.as_ref(), &lensfun_view);
             // Said here as well as on import, so a missing profile is never silent.
             if let Some(missing) = metadata.as_ref().and_then(|m| r.missing_lens_profile(m)) {
                 control_row(ui, "", |ui| {
@@ -1255,6 +1292,9 @@ impl Editor {
                         .wrap(),
                     );
                 });
+            }
+            if let Some(m) = &metadata {
+                lensfun_action = lensfun::card(ui, r, m, &lensfun_view);
             }
             if r.lens_profile {
                 subheading(ui, "Amount");
@@ -1529,6 +1569,9 @@ impl Editor {
         if let Some(treatment) = treatment_request {
             self.set_treatment(treatment);
         }
+        if fit_camera_look {
+            self.start_camera_look();
+        }
         if auto_mix_request {
             self.auto_black_white_mix();
         }
@@ -1562,6 +1605,17 @@ impl Editor {
         if import_lens {
             self.dialog(FileDialog::LensProfile, &ui.ctx().clone());
         }
+        match lensfun_action {
+            Some(lensfun::Action::Download) => {
+                self.lensfun.start(
+                    crate::app::lensfun::Job::Install,
+                    self.tx.clone(),
+                    ui.ctx().clone(),
+                );
+            }
+            Some(lensfun::Action::Cancel) => self.lensfun.cancel(),
+            None => {}
+        }
         if let Some(kind) = import_folder {
             self.dialog(FileDialog::ImportFolder(kind), &ui.ctx().clone());
         }
@@ -1583,6 +1637,7 @@ impl Editor {
             match result {
                 Ok(done) => {
                     if !done.imported.is_empty() {
+                        self.profile_library = crate::camera_profiles::library_fingerprint();
                         let crate::camera_profiles::Listed {
                             profiles,
                             errors,
@@ -1591,6 +1646,11 @@ impl Editor {
                         // As the loader's: the raw defaults are resolved again
                         // after this frame, so changing an unedited photo's recipe
                         // is not taken for an edit.
+                        let profiles = super::camera_look::keep_fitted_default(
+                            &self.document.profiles,
+                            &m,
+                            profiles,
+                        );
                         let _ = self.tx.send(super::worker::Event::Profiles {
                             id: self.load.id(),
                             profiles,
@@ -1605,22 +1665,22 @@ impl Editor {
                     reasons.sort_unstable();
                     reasons.dedup();
                     let reasons = reasons.join("; ");
-                    self.status = match (done.imported.len(), done.skipped.len()) {
-                        (0, k) => format!(
+                    match (done.imported.len(), done.skipped.len()) {
+                        (0, k) => self.messages.warn(format!(
                             "No new Adobe profiles for {} {}; skipped {k} ({reasons}).",
                             m.make, m.model
-                        ),
-                        (n, 0) => format!(
+                        )),
+                        (n, 0) => self.messages.done(format!(
                             "Imported {n} Adobe profiles for {} {}. Choose one from the Profile menu.",
                             m.make, m.model
-                        ),
-                        (n, k) => format!(
+                        )),
+                        (n, k) => self.messages.warn(format!(
                             "Imported {n} Adobe profiles for {} {}, skipped {k} ({reasons}). Choose one from the Profile menu.",
                             m.make, m.model
-                        ),
-                    };
+                        )),
+                    }
                 }
-                Err(e) => self.status = format!("Profiles not imported: {e:#}"),
+                Err(e) => self.messages.fail(format!("Profiles not imported: {e:#}")),
             }
         }
     }

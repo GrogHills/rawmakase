@@ -4,6 +4,36 @@ use crate::variant::Variant;
 /// A crop position that is not known.
 pub const UNSET: u32 = 0xffff;
 
+/// The colour space a camera rendered its embedded JPEGs in, as its maker notes
+/// say (Nikon's ColorSpace, Olympus's CameraSettings ColorSpace), where the EXIF
+/// may not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PreviewSpace {
+    Srgb,
+    AdobeRgb,
+}
+
+/// Where the colour matrix in [`RawInfo::cam_xyz`] comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MatrixSource {
+    /// None: the camera table has no row and the file holds none.
+    #[default]
+    Absent,
+    /// The camera table's row from Adobe DNG Converter's output.
+    AdobeDng,
+    /// The camera table's row from RAWmakase's earlier decoder, for a camera
+    /// Adobe has no matrix for.
+    CompatObserved,
+    /// The DNG's own ColorMatrix tags (or a table rule from them).
+    File,
+    /// The DNG's own ColorMatrix, of a tungsten calibration alone.
+    FileTungstenOnly,
+    /// A matrix the camera's maker notes give (Olympus), with its D65 levels.
+    MakerNote,
+    /// A monochrome DNG's neutral colour, by definition.
+    Neutral,
+}
+
 /// A RAW file's header facts: identity, geometry, levels' sources, colour and
 /// exposure. Names, sizes, crops and levels follow the conventions RAWmakase
 /// has always read them with, so saved edits keep their geometry and scale.
@@ -35,6 +65,10 @@ pub struct RawInfo {
     /// size is known; all [`UNSET`] and zero sizes when there is none).
     pub frame: [u32; 4],
     pub aspect: [u32; 4],
+    /// How much smaller than the sensor's the frame's diagonal is, when the camera
+    /// recorded only part of its sensor in a crop mode (Canon's APS-C and APS-H
+    /// modes); `None` for the whole sensor or when not known.
+    pub sensor_crop: Option<f32>,
     /// Panasonic's sensor borders (RW2 tags 4 to 7), `[left, top, width,
     /// height]` in sensor coordinates, when the default crop is the camera's
     /// aspect ratio inside them.
@@ -82,6 +116,14 @@ pub struct RawInfo {
     pub presets: Presets,
     /// XYZ (D65) to camera, rows red, green, blue; zero when unknown.
     pub cam_xyz: [[f32; 3]; 3],
+    /// Where `cam_xyz` comes from.
+    pub matrix_source: MatrixSource,
+    /// The colour space of the camera's JPEGs, when the maker notes say it.
+    pub preview_space: Option<PreviewSpace>,
+    /// The look the camera's JPEGs were made with, by the maker's name for it: a
+    /// Fujifilm film simulation, Sony Creative Style, Nikon Picture Control or Canon
+    /// Picture Style.
+    pub camera_look: Option<String>,
     /// Camera to sRGB primaries (rows sum to one).
     pub rgb_cam: [[f32; 3]; 3],
     pub lens: String,
@@ -103,8 +145,10 @@ pub struct RawInfo {
     pub(crate) uncompressed_preview: bool,
     /// A DNG's AsShotWhiteXY, when it gives the white balance so.
     pub(crate) as_shot_xy: Option<[f64; 2]>,
-    /// The XYZ (D65) to camera matrix the file itself holds (a DNG's).
+    /// The XYZ (D65) to camera matrix the file itself holds (a DNG's), and
+    /// where in the file it comes from.
     pub(crate) file_matrix: Option<[[f32; 3]; 3]>,
+    pub(crate) file_matrix_source: MatrixSource,
     /// The canonical name the file itself gives (Hasselblad's sensor
     /// names), where the camera table has none.
     pub(crate) canonical: Option<[String; 2]>,
@@ -176,6 +220,7 @@ pub(crate) fn base(variant: Variant) -> RawInfo {
         variant,
         make: String::new(),
         model: String::new(),
+        sensor_crop: None,
         file_make: String::new(),
         file_model: String::new(),
         normalized_make: String::new(),
@@ -208,6 +253,9 @@ pub(crate) fn base(variant: Variant) -> RawInfo {
         pre_mul: [0.; 4],
         presets: Presets::default(),
         cam_xyz: [[0.; 3]; 3],
+        matrix_source: MatrixSource::Absent,
+        preview_space: None,
+        camera_look: None,
         rgb_cam: [[0.; 3]; 3],
         lens: String::new(),
         lens_id: 0,
@@ -218,6 +266,7 @@ pub(crate) fn base(variant: Variant) -> RawInfo {
         uncompressed_preview: false,
         as_shot_xy: None,
         file_matrix: None,
+        file_matrix_source: MatrixSource::Absent,
         canonical: None,
         image_size: None,
     }

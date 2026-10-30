@@ -495,6 +495,12 @@ fn render(
     let (mut recipe, mut notes) = match &photo.edit {
         Edit::Catalog(record) => {
             let (profiles, _) = crate::camera_profiles::installed(opened.metadata());
+            let profiles = rawmakase_decode::camera_look::with_default(
+                &photo.source,
+                opened.metadata(),
+                profiles,
+                cancel,
+            );
             let resolved = edits::resolve(
                 record,
                 &photo.source,

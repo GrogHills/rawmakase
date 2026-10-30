@@ -29,10 +29,12 @@ fn everything_changed() -> Recipe {
         lens_profile: true,
         lens_profile_choice: crate::lens::choice::LensProfileChoice {
             setup: crate::lens::choice::LensProfileSetup::Custom,
-            id: Some(crate::lens::choice::LensProfileId {
-                name: "Adobe (Test 35mm)".into(),
-                ..Default::default()
-            }),
+            id: Some(crate::lens::choice::LensProfileRef::Adobe(
+                crate::lens::choice::LensProfileId {
+                    name: "Adobe (Test 35mm)".into(),
+                    ..Default::default()
+                },
+            )),
         },
         lens_distortion: 0.5,
         lens_vignetting: 1.5,
@@ -672,11 +674,13 @@ fn a_lens_profile_the_target_cannot_use_is_reported() {
     );
     // So is the camera's own profile on a photo whose RAW has none.
     let mut embedded = source.clone();
-    embedded.lens_profile_choice.id = Some(crate::lens::choice::LensProfileId {
-        name: "Camera Settings".into(),
-        embedded: true,
-        ..Default::default()
-    });
+    embedded.lens_profile_choice.id = Some(crate::lens::choice::LensProfileRef::Adobe(
+        crate::lens::choice::LensProfileId {
+            name: "Camera Settings".into(),
+            embedded: true,
+            ..Default::default()
+        },
+    ));
     let out = transfer(
         from(&embedded, &m),
         &Recipe::default(),
@@ -857,4 +861,47 @@ fn syncing_from_a_jpeg_to_a_raw_keeps_the_raws_white_balance_and_profile() {
     );
     assert_eq!(out.recipe.exposure, 0.5);
     assert!(out.notes.is_empty(), "{:?}", out.notes);
+}
+
+/// A fitted camera look belongs to the photo it was fitted to: Sync copies the
+/// source's, never a same-named fit of the target, and not to another camera.
+#[test]
+fn a_fitted_look_moves_as_the_sources_own() {
+    use crate::camera_profiles::fitted;
+    let m = camera("Fujifilm", "X100F");
+    let fit = |shift: f32| {
+        let mut look = fitted::FittedLook::identity();
+        look.table[9][0] = shift;
+        Arc::new(fitted::with_look(&fitted::standard_base(&m).unwrap(), &look).unwrap())
+    };
+    let (source_fit, target_fit) = (fit(5.), fit(-5.));
+    let source = Recipe {
+        profile: Some(source_fit.clone()),
+        ..Default::default()
+    };
+    let profiles = [target_fit.clone()];
+    let out = transfer(
+        from(&source, &m),
+        &Recipe::default(),
+        &GroupSelection::default(),
+        Target {
+            metadata: &m,
+            profiles: &profiles,
+        },
+    );
+    assert_eq!(out.recipe.profile.as_deref(), Some(&*source_fit));
+    // Another camera keeps its own profile, with a note.
+    let other = camera("Fujifilm", "X-T5");
+    let kept = Recipe::default();
+    let out = transfer(
+        from(&source, &m),
+        &kept,
+        &GroupSelection::default(),
+        Target {
+            metadata: &other,
+            profiles: &profiles,
+        },
+    );
+    assert_eq!(out.recipe.profile, kept.profile);
+    assert!(!out.notes.is_empty());
 }

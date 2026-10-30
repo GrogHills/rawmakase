@@ -32,7 +32,7 @@ mod vendor;
 pub use captured::{CaptureDates, Stamp};
 pub use error::{Error, Result};
 pub use exif_tiffs::ExifTiffs;
-pub use info::{Cfa, Presets, RawInfo, SuperCcd, UNSET};
+pub use info::{Cfa, MatrixSource, Presets, PreviewSpace, RawInfo, SuperCcd, UNSET};
 pub use preview::{NoPreview, is_jpeg_xl};
 pub use sensor::Sensor;
 use std::sync::atomic::AtomicBool;

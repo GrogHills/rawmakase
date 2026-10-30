@@ -85,7 +85,15 @@ pub fn open(path: &Path) -> Result<Raw> {
                 .profile_calibration_signature
                 .filter(|signature| !signature.is_empty());
         }
-        let fits = profile.is_some_and(|p| p.ensure_camera(metadata).is_ok());
+        let fits = profile
+            .as_ref()
+            .is_some_and(|p| p.ensure_camera(metadata).is_ok());
+        metadata.embedded_profile_status = embedded_profile_status(
+            dng.profile.is_some() || dng.profile_unreadable,
+            profile.is_some(),
+            fits,
+            color_matrix.is_some(),
+        );
         metadata.embedded_dcp = dng.profile.filter(|_| fits).map(std::sync::Arc::from);
         // A DNG the decoder found no XYZ-to-camera matrix for, written with
         // colour matrices but no profile, would render without a profile at
@@ -98,6 +106,7 @@ pub fn open(path: &Path) -> Result<Raw> {
             && matrix.iter().flatten().any(|v| *v != 0.)
         {
             metadata.cam_xyz = matrix;
+            metadata.matrix_source = rawmakase_model::camera_data::MatrixSource::File;
         }
         if dng.lens.is_some() {
             metadata.lens = dng.lens;
@@ -121,8 +130,89 @@ pub fn open(path: &Path) -> Result<Raw> {
     Ok(raw)
 }
 
+/// What a DNG's embedded profile tags are to its photo: none, a profile that
+/// parses and fits the camera, one for another camera, colour matrices alone, or
+/// tags that are neither (an error that must not read as no profile).
+fn embedded_profile_status(
+    present: bool,
+    parses: bool,
+    fits: bool,
+    matrix_only: bool,
+) -> rawmakase_model::camera_data::EmbeddedProfileStatus {
+    use rawmakase_model::camera_data::EmbeddedProfileStatus as S;
+    match (present, parses, fits, matrix_only) {
+        (false, ..) => S::None,
+        (true, true, true, _) => S::Usable,
+        (true, true, false, _) => S::OtherCamera,
+        (true, false, _, true) => S::MatrixOnly,
+        (true, false, _, false) => S::Unreadable,
+    }
+}
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_embedded_profile_is_told_from_none_and_from_an_unreadable_one() {
+        use rawmakase_model::camera_data::{EmbeddedProfileStatus as S, MatrixSource};
+        let chart = |name: &str| {
+            let path = format!(
+                "{}/../../tests/corpus/charts/{name}.dng",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            super::open(std::path::Path::new(&path)).unwrap().metadata
+        };
+        let named = chart("synthetic-d65");
+        assert_eq!(named.embedded_profile_status, S::Usable);
+        let matrix = chart("synthetic-d65-matrix-only");
+        assert_eq!(matrix.embedded_profile_status, S::MatrixOnly);
+        assert_eq!(matrix.matrix_source, MatrixSource::File);
+        // The chart's IFD0 entries rewritten by `patch` (tag, then the entry's 12
+        // bytes), in a copy.
+        let dir = tempfile::tempdir().unwrap();
+        let patched = |name: &str, patch: &dyn Fn(u16, &mut [u8])| {
+            let path = format!(
+                "{}/../../tests/corpus/charts/synthetic-d65.dng",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let mut bytes = std::fs::read(path).unwrap();
+            let first = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+            let count = u16::from_le_bytes(bytes[first..first + 2].try_into().unwrap()) as usize;
+            for i in 0..count {
+                let at = first + 2 + i * 12;
+                let tag = u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+                patch(tag, &mut bytes[at..at + 12]);
+            }
+            let out = dir.path().join(name);
+            std::fs::write(&out, bytes).unwrap();
+            super::open(&out).unwrap().metadata
+        };
+        // A profile tag whose value lies past the file's end: unreadable, not absent.
+        let unreadable = patched("unreadable.dng", &|tag, entry| {
+            if tag == 50936 {
+                entry[8..].copy_from_slice(&0x7fff_ff00u32.to_le_bytes());
+            }
+        });
+        assert_eq!(unreadable.embedded_profile_status, S::Unreadable);
+        // No colour tags at all (UniqueCameraModel alone): no profile.
+        let colourless = patched("colourless.dng", &|tag, entry| {
+            if [50721, 50722, 50938, 50939, 50964, 50965, 50982].contains(&tag) {
+                entry[..2].copy_from_slice(&(tag + 10000).to_le_bytes());
+            }
+        });
+        assert_eq!(colourless.embedded_profile_status, S::None);
+        // Tags that are there but say nothing usable are not "no profile".
+        assert_eq!(
+            super::embedded_profile_status(true, false, false, false),
+            S::Unreadable
+        );
+        assert_eq!(
+            super::embedded_profile_status(true, true, false, false),
+            S::OtherCamera
+        );
+        assert_eq!(
+            super::embedded_profile_status(false, false, false, false),
+            S::None
+        );
+    }
     #[test]
     fn matrix_only_dng_keeps_its_profile_calibration_signature() {
         // Append a new IFD without moving the existing compressed mosaic tiles.
@@ -275,7 +365,8 @@ mod tests {
         (dir, path)
     }
 
-    /// A monochrome DNG develops as grey, its one sample every channel's, and
+    /// A monochrome DNG develops as grey, its one sample every channel's (a
+    /// sample below black as 0), and
     /// renders grey whatever the white balance: through the default profile
     /// and RAWmakase Color, with Temp and Tint changed (which leave its gains
     /// at 1, as it has no white balance), an eyedropper's pick, and gains an
@@ -283,7 +374,8 @@ mod tests {
     #[test]
     fn monochrome_dngs_develop_and_render_grey() {
         use rawmakase_model::model::recipe::Recipe;
-        let (_dir, path) = monochrome_dng(4, &[220, 2236, 8301, 16383, 1000, 4000, 12000, 300]);
+        // 120 lies below the black level: noise there develops as 0.
+        let (_dir, path) = monochrome_dng(4, &[220, 2236, 8301, 16383, 1000, 4000, 12000, 120]);
         let raw = super::open(&path).unwrap();
         let m = raw.metadata.clone();
         assert!(m.monochrome);
@@ -298,9 +390,9 @@ mod tests {
         for (p, v) in im
             .pixels
             .iter()
-            .zip([220, 2236, 8301, 16383, 1000, 4000, 12000, 300])
+            .zip([220, 2236, 8301, 16383, 1000, 4000, 12000, 120])
         {
-            let want = (v as f32 - 220.) / (16383. - 220.);
+            let want = ((v as f32 - 220.) / (16383. - 220.)).max(0.);
             assert_eq!(*p, [want; 3]);
         }
         let color = std::sync::Arc::new(crate::camera_profiles::open::color(&m).unwrap());

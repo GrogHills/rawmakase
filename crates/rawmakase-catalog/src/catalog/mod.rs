@@ -28,6 +28,7 @@ mod develop_history;
 mod edit_records;
 mod edit_rows;
 mod edits;
+mod export_catalog;
 pub mod file_ops;
 pub mod folder_sync;
 mod format_upgrade;
@@ -41,6 +42,7 @@ mod mask_assets;
 mod models;
 mod naming;
 // XMP metadata sidecars; `legacy_sidecar` is the old `*.rawmakase.json` edits.
+mod sequences;
 mod sidecar;
 mod snapshots;
 mod stacks;
@@ -50,18 +52,23 @@ pub use crate::xmp::descriptive::Read as FileMetadata;
 #[doc(hidden)]
 pub use checksums::ReadChecksum;
 pub use db::assert_shape as assert_sql_shape;
-pub use defaults::{CameraExifReader, MetadataDefaults, NewPhotoDefaults};
+pub use defaults::{CameraExifReader, ImportOptions, MetadataDefaults, NewPhotoDefaults};
 pub use descriptive::MetadataSnapshot;
 pub use develop_history::{HistoryUpdate, SavedHistory, SavedStep};
 pub use edits::{EditChange, EditToSave};
-pub use ingest::{Ambiguity, Choice, Conflict};
+pub use export_catalog::{CatalogExport, ExportScope, ExportedFolders};
+pub use ingest::{Ambiguity, Choice, Conflict, IMPORT_BURST_SECONDS, PendingBurstStacks};
 pub use lightroom::HistoryStep;
 pub use location::CatalogLocation;
 pub use locations::{Override, Overrides, RootLocations};
 pub use models::{Collection, CollectionKind, Folder, Photo, QUICK_COLLECTION};
+pub use sequences::SavedSequence;
 pub use sidecar::{RawXmpReader, SidecarReport, read_file as read_file_metadata, sidecars};
 pub use snapshots::{Snapshot, SnapshotSettings};
-pub use stacks::{SavedStack, StackChange, StackPlace, StackState, StacksChanged, auto_stacks};
+pub use stacks::{
+    BurstCandidate, SavedStack, StackChange, StackPlace, StackState, StacksChanged, auto_stacks,
+    auto_stacks_with_bursts,
+};
 impl Catalog {
     pub fn create(path: &Path) -> Result<Self> {
         ensure!(!path.exists(), "Catalog already exists: {}", path.display());
@@ -382,7 +389,11 @@ mod descriptive_tests;
 #[cfg(test)]
 mod edit_rows_tests;
 #[cfg(test)]
+mod export_catalog_tests;
+#[cfg(test)]
 mod format_upgrade_tests;
+#[cfg(test)]
+mod import_bursts_tests;
 #[cfg(test)]
 mod ingest_tests;
 #[cfg(test)]
@@ -398,6 +409,8 @@ mod portable_sql_tests;
 pub mod preview_cache;
 #[cfg(test)]
 mod private_tests;
+#[cfg(test)]
+mod sequences_tests;
 #[cfg(test)]
 mod sql_scan;
 #[cfg(test)]

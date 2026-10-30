@@ -23,6 +23,8 @@ use crate::preview::Candidate;
 /// What the maker note says that reading the file needs.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Notes {
+    /// The Picture Control the camera's JPEGs were made with.
+    pub picture_control: Option<String>,
     /// As-shot multipliers: red, green, blue, second green.
     pub cam_mul: Option<[f32; 4]>,
     pub presets: Presets,
@@ -48,6 +50,8 @@ pub(crate) struct Notes {
     pub coolpix: Coolpix,
     /// The ISO speed the note gives: ISO (0x0002), else ISOInfo's (0x0025).
     pub iso: Option<f32>,
+    /// ColorSpace (0x001E): 1 sRGB, 2 Adobe RGB.
+    pub color_space: Option<crate::info::PreviewSpace>,
 }
 
 /// A Coolpix's colour data, which also tells how its raw data is stored.
@@ -73,6 +77,30 @@ pub(crate) struct Curve {
     pub points: Vec<u16>,
     /// The row from which the second Huffman table codes the data; 0 for none.
     pub split: u16,
+}
+
+/// PictureControlData's name: 20 characters after the version, which is written twice
+/// from version 0310 on. Upper case in the file, as the camera's menu doesn't show it.
+fn picture_control(data: &[u8]) -> Option<String> {
+    let at = if data.get(4..8) == data.get(..4) {
+        8
+    } else {
+        4
+    };
+    let name = data.get(at..at + 20)?;
+    let text = String::from_utf8_lossy(name.split(|b| *b == 0).next()?);
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map_or(String::new(), |f| {
+                f.to_uppercase()
+                    .chain(c.flat_map(char::to_lowercase))
+                    .collect()
+            })
+        })
+        .collect();
+    (!words.is_empty()).then(|| words.join(" "))
 }
 
 /// The maker note of `t`'s EXIF directory, read.
@@ -126,6 +154,9 @@ fn read_note(note: &TiffFile, headerless: bool, model: &str) -> Notes {
     {
         notes.cam_mul = Some([levels[0] as f32, 1., levels[1] as f32, 1.]);
     }
+    notes.picture_control = note
+        .raw_upto(ifd, 0x0023, 28)
+        .and_then(|data| picture_control(&data));
     let keys = Keys::of(note, ifd, model);
     // The balance and its black are in the first 80 bytes (version 0100's
     // levels end there); the cipher's stream does not depend on the length.
@@ -158,6 +189,11 @@ fn read_note(note: &TiffFile, headerless: bool, model: &str) -> Notes {
         .filter(|c| c.len() == 4)
         .map(|c| [c[0], c[1], c[2], c[3]]);
     notes.compression = note.int(ifd, 0x0093);
+    notes.color_space = match note.int(ifd, 0x001e) {
+        Some(1) => Some(crate::info::PreviewSpace::Srgb),
+        Some(2) => Some(crate::info::PreviewSpace::AdobeRgb),
+        _ => None,
+    };
     // ISOInfo's ISO byte is 100 × 2^(v / 12 − 5).
     let iso_info = note
         .raw_upto(ifd, 0x0025, 1)
@@ -460,14 +496,30 @@ const COUNT_KEYS: [u8; 256] = [
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_picture_control_is_read_from_either_layout() {
+        let name = |version: &[u8], text: &[u8]| {
+            let mut d = version.to_vec();
+            d.extend(text);
+            d.resize(version.len() + 20, 0);
+            picture_control(&d)
+        };
+        assert_eq!(name(b"03100310", b"NEUTRAL").as_deref(), Some("Neutral"));
+        assert_eq!(name(b"0100", b"MONOCHROME").as_deref(), Some("Monochrome"));
+        assert_eq!(name(b"0100", b"FLAT LOOK").as_deref(), Some("Flat Look"));
+        assert_eq!(name(b"0100", b""), None);
+    }
+
     /// Adobe's MakN record of a Nikon note (its own TIFF, ISO 200 in
     /// 0x0002) is read; other records, and the record cut anywhere, are
     /// none or read without panicking.
     #[test]
     fn reads_the_note_a_dng_keeps() {
         let mut note = b"Nikon\0\x02\x10\0\0MM\0\x2a\0\0\0\x08".to_vec();
-        note.extend(1u16.to_be_bytes());
+        note.extend(2u16.to_be_bytes());
         note.extend([0, 2, 0, 3, 0, 0, 0, 2, 0, 0, 0, 200]);
+        // ColorSpace 2: Adobe RGB.
+        note.extend([0, 0x1e, 0, 3, 0, 0, 0, 1, 0, 2, 0, 0]);
         note.extend(0u32.to_be_bytes());
         let mut file = b"junk".to_vec();
         file.extend(b"Adobe\0MakN");
@@ -476,6 +528,7 @@ mod tests {
         file.extend(&note);
         let notes = read_dng(&file, 4, "D80").unwrap();
         assert_eq!((notes.iso, notes.lens_id), (Some(200.), 0));
+        assert_eq!(notes.color_space, Some(crate::info::PreviewSpace::AdobeRgb));
         assert!(read_dng(&file, 0, "D80").is_none());
         for n in 0..file.len() {
             let _ = read_dng(&file[..n], 4, "D80");

@@ -332,6 +332,26 @@ impl Preset {
                     .flatten()
             })
     }
+    /// The fitted camera look these settings carry (`rawmakase:FittedProfile`), for
+    /// a look that names one: an error when it is missing, damaged, altered or for
+    /// another camera, which the settings then can't render as they were made.
+    fn fitted_profile(&self, m: &Metadata) -> Result<Option<CameraProfile>> {
+        let carried = self.settings.get(super::FITTED_PROFILE_KEY);
+        if self.look != crate::camera_profiles::fitted::LOOK && carried.is_none() {
+            return Ok(None);
+        }
+        let carried = carried.context("The fitted camera look's profile is missing")?;
+        let p = crate::camera_profiles::fitted::from_carried(carried, m)
+            .context("The fitted camera look can't be used")?;
+        if let Some(uuid) = self.settings.get("RAWmakaseLookUUID") {
+            let own = p.enhanced.as_ref().map(|e| e.uuid.as_str()).unwrap_or("");
+            ensure!(
+                own.eq_ignore_ascii_case(uuid),
+                "The fitted camera look does not match its UUID"
+            );
+        }
+        Ok(Some(p))
+    }
     /// Whether this preset's look, if it names one, can be rendered here.
     pub fn look_available(&self, m: &Metadata, profiles: &[Arc<CameraProfile>]) -> bool {
         self.look.is_empty() || self.resolve_look(m, profiles).is_some()
@@ -377,20 +397,27 @@ impl Preset {
             "Preset requires external RGB tables"
         );
         settings.seen.insert("CameraProfile".into());
-        if let Some(name) = self.requested_profile() {
-            r.profile = Some(
-                self.resolve_profile(name, m, profiles)
-                    .with_context(|| format!("Missing camera profile ‘{name}’ for {}", m.model))?,
-            );
-        }
+        settings.seen.insert(super::FITTED_PROFILE_KEY.into());
         settings.seen.insert("RAWmakaseLookUUID".into());
-        if !self.look.is_empty() {
-            r.profile = Some(self.resolve_look(m, profiles).with_context(|| {
-                format!(
-                    "Missing or unsupported enhanced profile ‘{}’ for {}",
-                    self.look, m.model
-                )
-            })?);
+        // A fitted camera look renders from the profile the settings carry, checked,
+        // never from a profile of its name: no other photo's fit is this one.
+        if let Some(fitted) = self.fitted_profile(m)? {
+            r.profile = Some(Arc::new(fitted));
+        } else {
+            if let Some(name) = self.requested_profile() {
+                r.profile =
+                    Some(self.resolve_profile(name, m, profiles).with_context(|| {
+                        format!("Missing camera profile ‘{name}’ for {}", m.model)
+                    })?);
+            }
+            if !self.look.is_empty() {
+                r.profile = Some(self.resolve_look(m, profiles).with_context(|| {
+                    format!(
+                        "Missing or unsupported enhanced profile ‘{}’ for {}",
+                        self.look, m.model
+                    )
+                })?);
+            }
         }
         // A new profile starts at 100%; a look that supports Amount takes the preset's.
         settings.seen.insert(super::look::SETTING.into());
@@ -951,6 +978,7 @@ impl Preset {
     }
 
     /// Straighten, lens corrections, Transform and crop.
+    #[allow(clippy::too_many_lines)]
     fn apply_geometry(
         &self,
         settings: &mut Settings<'_>,
@@ -986,6 +1014,7 @@ impl Preset {
                 embedded,
             }
         });
+        let id = id.map(crate::lens::choice::LensProfileRef::Adobe);
         if let Some(setup) = v.get("LensProfileSetup") {
             // A Setup names its profile, or none (a preset's "Default").
             r.lens_profile_choice = crate::lens::choice::LensProfileChoice {
@@ -994,6 +1023,20 @@ impl Preset {
             };
         } else if id.is_some() {
             r.lens_profile_choice.id = id;
+        }
+        // A Lensfun lens RAWmakase wrote, over the Setup it writes for Lightroom
+        // ("Auto"): resolved against the installed database now, which is the edit;
+        // without it, or without the lens, it stays named, unresolved.
+        for key in super::LENSFUN_KEYS {
+            settings.seen.insert(key.into());
+        }
+        if let Some(choice) = lensfun_choice(v)? {
+            let choice = m
+                .lensfun
+                .get()
+                .and_then(|installed| choice.resolved(&installed.db, m))
+                .unwrap_or(choice);
+            r.lens_profile_choice.choose_lensfun(choice);
         }
         settings.assign(
             "LensProfileDistortionScale",
@@ -1243,4 +1286,39 @@ impl Preset {
         );
         Ok(())
     }
+}
+
+/// The Lensfun lens RAWmakase's own settings name (`LENSFUN_KEYS`), unresolved.
+fn lensfun_choice(
+    v: &BTreeMap<String, String>,
+) -> Result<Option<crate::lens::lensfun::LensfunChoice>> {
+    let text = |key: &str| v.get(key).map(|s| s.trim().to_string()).unwrap_or_default();
+    let model = text("rawmakase:LensfunModel");
+    if model.is_empty() {
+        return Ok(None);
+    }
+    let number = |key: &str| -> Result<f32> {
+        let n: f32 = text(key)
+            .parse()
+            .with_context(|| format!("Invalid {key}"))?;
+        ensure!(n.is_finite() && n > 0., "Invalid {key}");
+        Ok(n)
+    };
+    let lens = crate::lens::lensfun::LensfunLens {
+        maker: text("rawmakase:LensfunMaker"),
+        model,
+        mounts: text("rawmakase:LensfunMounts")
+            .split(';')
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .collect(),
+        crop: number("rawmakase:LensfunCrop")?,
+        aspect: number("rawmakase:LensfunAspect")?.max(1.),
+    };
+    let database = text("rawmakase:LensfunDatabase").parse().unwrap_or(0);
+    Ok(Some(crate::lens::lensfun::LensfunChoice::unresolved(
+        lens,
+        text("rawmakase:LensfunName"),
+        database,
+    )))
 }

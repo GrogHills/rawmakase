@@ -7,7 +7,8 @@
 //! unbounded allocation.
 
 use rawmakase_inference::{
-    Analysis, Coverage, InferenceError, LoadOptions, Prompt, RgbImage, Session, Subject,
+    Analysis, Coverage, InferenceError, LoadOptions, Prompt, RgbImage, SKY, Session, Sky,
+    SkySession, Subject,
 };
 use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
@@ -44,6 +45,8 @@ pub trait Engine: Send {
         prompt: &Prompt,
         cancel: &AtomicBool,
     ) -> Result<Coverage, EngineError>;
+    /// The photo's sky, from its own model.
+    fn sky(&mut self, photo: &RgbImage, cancel: &AtomicBool) -> Result<Coverage, EngineError>;
     /// What a `ping` says about this worker, as the runtime reported it.
     fn describe(&self) -> Info;
 }
@@ -64,7 +67,6 @@ pub struct Outcome {
     /// The name the photo's clicks are asked under.
     pub key: String,
     pub subject: Coverage,
-    pub sky: Coverage,
 }
 
 /// What [`Engine::describe`] says.
@@ -72,6 +74,8 @@ pub struct Outcome {
 pub struct Info {
     pub model: String,
     pub panoptic: String,
+    /// The sky model, empty when the worker has none.
+    pub sky: String,
     pub provider: String,
 }
 
@@ -79,6 +83,8 @@ pub struct Info {
 /// about lately.
 pub struct Model {
     session: Session,
+    /// The sky model, when the worker was given one.
+    sky: Option<SkySession>,
     cache: HashMap<String, Entry>,
     order: VecDeque<String>,
     bytes: usize,
@@ -87,7 +93,6 @@ pub struct Model {
 struct Entry {
     analysis: Analysis,
     subject: Coverage,
-    sky: Coverage,
 }
 
 impl Model {
@@ -97,10 +102,21 @@ impl Model {
     pub fn load(dir: &std::path::Path, options: &LoadOptions) -> Result<Self, InferenceError> {
         Ok(Self {
             session: Subject::load_with(dir, options)?,
+            sky: None,
             cache: HashMap::new(),
             order: VecDeque::new(),
             bytes: 0,
         })
+    }
+
+    /// Loads the sky model from its folder too; without it, Sky requests are refused.
+    pub fn with_sky(
+        mut self,
+        dir: &std::path::Path,
+        options: &LoadOptions,
+    ) -> Result<Self, InferenceError> {
+        self.sky = Some(Sky::load_with(dir, options)?);
+        Ok(self)
     }
 
     /// The provider the loaded sessions run on.
@@ -116,23 +132,20 @@ impl Engine for Model {
             return Ok(Outcome {
                 key,
                 subject: entry.subject.clone(),
-                sky: entry.sky.clone(),
             });
         }
         let analysis = self.session.analyze(photo, cancel).map_err(engine_error)?;
         let subject = analysis.subject().map_err(engine_error)?;
-        let sky = analysis.sky().map_err(engine_error)?;
-        let held = analysis.bytes() + subject.data.len() + sky.data.len();
+        let held = analysis.bytes() + subject.data.len();
         self.remember(
             key.clone(),
             Entry {
                 analysis,
                 subject: subject.clone(),
-                sky: sky.clone(),
             },
             held,
         );
-        Ok(Outcome { key, subject, sky })
+        Ok(Outcome { key, subject })
     }
 
     fn segment(
@@ -152,11 +165,25 @@ impl Engine for Model {
             .map_err(engine_error)
     }
 
+    fn sky(&mut self, photo: &RgbImage, cancel: &AtomicBool) -> Result<Coverage, EngineError> {
+        let Some(sky) = &mut self.sky else {
+            return Err(EngineError::Failed(InferenceError::ModelInvalid(
+                "this worker has no sky model; start it with --sky-model".into(),
+            )));
+        };
+        sky.select(photo, cancel).map_err(engine_error)
+    }
+
     fn describe(&self) -> Info {
         let spec = self.session.spec();
         Info {
             model: format!("{}@{}", spec.id, &spec.files[1].sha256[..16]),
             panoptic: rawmakase_inference::PANOPTIC.id.to_string(),
+            sky: self
+                .sky
+                .as_ref()
+                .map(|_| format!("{}@{}", SKY.id, &SKY.file.sha256[..16]))
+                .unwrap_or_default(),
             provider: self.session.provider().name().to_string(),
         }
     }
@@ -186,7 +213,7 @@ impl Model {
                 break;
             }
             if let Some(gone) = self.cache.remove(&oldest) {
-                self.bytes -= gone.analysis.bytes() + gone.subject.data.len() + gone.sky.data.len();
+                self.bytes -= gone.analysis.bytes() + gone.subject.data.len();
             }
         }
         self.bytes += held;
@@ -283,6 +310,7 @@ impl<E: Engine + 'static> Server<E> {
                         Reply::Ping {
                             model: info.model,
                             panoptic: info.panoptic,
+                            sky: info.sky,
                             provider: info.provider,
                         },
                     )?;
@@ -320,7 +348,49 @@ impl<E: Engine + 'static> Server<E> {
                             Reply::Analyze {
                                 key: outcome.key,
                                 subject: WireCoverage::of(&outcome.subject),
-                                sky: WireCoverage::of(&outcome.sky),
+                            },
+                        )?,
+                        Err(e) => {
+                            let stop = matches!(e, EngineError::Cancelled);
+                            self.engine_error(&mut stream, &request_id, &e)?;
+                            if stop {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                Op::Sky {
+                    width,
+                    height,
+                    pixels,
+                } => {
+                    let photo = match photo(width, height, pixels) {
+                        Ok(photo) => photo,
+                        Err(why) => {
+                            self.refuse(&mut stream, &request_id, Code::Invalid, why)?;
+                            return Ok(());
+                        }
+                    };
+                    if let Err(why) = self.register(&request_id, running.clone()) {
+                        self.refuse(&mut stream, &request_id, Code::Invalid, why)?;
+                        return Ok(());
+                    }
+                    let outcome = self
+                        .engine
+                        .lock()
+                        .expect("engine lock")
+                        .sky(&photo, &running);
+                    self.cancels
+                        .lock()
+                        .expect("cancel registry")
+                        .running
+                        .remove(&request_id);
+                    match outcome {
+                        Ok(coverage) => self.answer(
+                            &mut stream,
+                            &request_id,
+                            Reply::Sky {
+                                coverage: WireCoverage::of(&coverage),
                             },
                         )?,
                         Err(e) => {

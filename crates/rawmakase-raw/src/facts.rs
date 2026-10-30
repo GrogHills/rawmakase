@@ -198,7 +198,6 @@ pub(crate) struct Matrix {
     pub make: String,
     pub model: String,
     pub xyz: [i32; 9],
-    #[allow(dead_code)]
     pub source: Source,
 }
 
@@ -306,13 +305,28 @@ pub(crate) fn iso_white(
 
 /// The camera's XYZ (D65) to camera matrix.
 pub(crate) fn matrix(make: &str, model: &str) -> Option<[[f32; 3]; 3]> {
+    matrix_with_source(make, model).map(|(m, _)| m)
+}
+
+/// The camera's XYZ (D65) to camera matrix and where the table has it from.
+pub(crate) fn matrix_with_source(
+    make: &str,
+    model: &str,
+) -> Option<([[f32; 3]; 3], crate::info::MatrixSource)> {
+    use crate::info::MatrixSource;
     let m = matrices()
         .matrix
         .iter()
         .find(|m| m.make == make && m.model == model)?;
-    Some(std::array::from_fn(|r| {
-        std::array::from_fn(|c| m.xyz[r * 3 + c] as f32 / 10000.)
-    }))
+    let source = match m.source {
+        Source::File => MatrixSource::File,
+        Source::AdobeDng => MatrixSource::AdobeDng,
+        Source::CompatObserved => MatrixSource::CompatObserved,
+    };
+    Some((
+        std::array::from_fn(|r| std::array::from_fn(|c| m.xyz[r * 3 + c] as f32 / 10000.)),
+        source,
+    ))
 }
 
 #[cfg(test)]

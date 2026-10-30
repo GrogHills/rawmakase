@@ -274,6 +274,12 @@ impl Editor {
             ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         ui.painter()
             .rect_filled(whole, 0., theme::palette(ui.ctx()).photo_backdrop());
+        if self.module == Module::Develop
+            && self.view.compare == before_after::Compare::CameraThumbnail
+        {
+            self.camera_thumbnail_ui(ui, whole);
+            return response;
+        }
         // The edit's side of the viewport; all of it unless Before shows beside it.
         let panes = before_after::panes(self.view.compare, whole);
         let area = panes.after.area;
@@ -394,7 +400,7 @@ impl Editor {
         if let (Some(region), Some(at)) = (&region_texture, region_rect) {
             painter.image(region.id(), at, uv, Color32::WHITE);
         }
-        if self.view.compare.before_only() {
+        if self.view.compare.renders_before_alone() {
             before_after::badge(ui, area, "Before");
         }
         self.develop_info_overlay(ui, panes.after.clip);
@@ -536,7 +542,7 @@ impl Editor {
             self.view.tool = Tool::None;
         }
         // Point Color's dropper adds a swatch of the color under the pointer and
-        // selects it; the status line says why when it can't. The preview must show the
+        // selects it; the top bar says why when it can't. The preview must show the
         // settings the sample is taken with, or the clicked color isn't the one sampled.
         if self.view.is(Tool::PointColor)
             && picking
@@ -552,7 +558,8 @@ impl Editor {
                 let v = (pos.y - rect.top()) / rect.height();
                 self.start_point_color_sample(u, v);
             } else {
-                self.status = "Wait for the preview to update, then pick again".into();
+                self.messages
+                    .warn("Wait for the preview to update, then pick again");
             }
         }
         // Before shows the unedited photo, so picking there would edit what is not shown.
@@ -569,11 +576,13 @@ impl Editor {
                 Some(rgb) => match develop::pick_fringe(self.document.edit.recipe_mut(), rgb) {
                     Some(_) => self.view.tool = Tool::None,
                     None => {
-                        self.status =
-                            "Cannot set the fringe color: click a purple or green fringe".into();
+                        self.messages
+                            .warn("Cannot set the fringe color: click a purple or green fringe");
                     }
                 },
-                None => self.status = "Wait for the preview to update, then pick again".into(),
+                None => self
+                    .messages
+                    .warn("Wait for the preview to update, then pick again"),
             }
         }
         if self.view.is(Tool::Crop) && !self.view.zoom.on && self.document.full().is_some() {

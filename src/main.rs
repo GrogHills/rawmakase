@@ -38,6 +38,10 @@ enum Command {
         #[arg(required = true, num_args = 1..)]
         files: Vec<PathBuf>,
     },
+    /// Lensfun's community lens profiles (CC BY-SA 3.0, from lensfun.github.io):
+    /// what is installed, installing, updating and removing them.
+    #[command(subcommand)]
+    Lensfun(LensfunCommand),
     ImportCatalog {
         source: PathBuf,
         output: PathBuf,
@@ -157,6 +161,21 @@ enum Command {
         #[arg(long, value_parser = parse_reference)]
         reference: Option<rawmakase::half_check::Reference>,
     },
+    /// Fit Camera Look (fitted) to each RAW's embedded JPEG, the camera's own
+    /// rendering, and say whether the look was used or why not, with its held-out
+    /// error against the JPEG (docs/lightroom-profiles.md#camera-look-fitted).
+    /// Nothing is saved.
+    FitLook {
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
+        /// Print each file's full measurements as a line of JSON.
+        #[arg(long)]
+        report: bool,
+        /// Fit a matrix even for a camera that has one, as for a camera without, and
+        /// compare it with the camera's own (the no-matrix trial).
+        #[arg(long)]
+        drop_matrix: bool,
+    },
     Benchmark {
         input: PathBuf,
         #[arg(long, default_value_t = 20)]
@@ -168,6 +187,22 @@ fn parse_reference(json: &str) -> Result<rawmakase::half_check::Reference, Strin
     serde_json::from_str(json).map_err(|e| e.to_string())
 }
 /// An `import-profiles --lut-space`.
+#[derive(Subcommand)]
+enum LensfunCommand {
+    /// The version installed, and where it came from.
+    Status,
+    /// Download and install Lensfun's database, or install an archive already
+    /// downloaded (Lensfun's version_2.tar.bz2).
+    Install {
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
+    /// Install Lensfun's newest database if it is newer than the one installed.
+    Update,
+    /// Remove the installed database; edits keep the corrections they use.
+    Remove,
+}
+
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum LutSpace {
     Srgb,
@@ -257,6 +292,7 @@ fn main() -> Result<()> {
             }
             anyhow::ensure!(!done.imported.is_empty(), "No lens profiles imported");
         }
+        Some(Command::Lensfun(command)) => lensfun(command)?,
         Some(Command::ImportProfiles { lut_space, files }) => {
             // Files and folders, imported as the app's Import does: a file that
             // can't be imported is reported and leaves the rest importing.
@@ -449,10 +485,15 @@ fn main() -> Result<()> {
                 rawmakase::catalog::legacy_sidecar::load(&input)?
                     .map(|s| s.recipe)
                     .unwrap_or_else(|| {
-                        Recipe::with_profiles(
+                        // As the app opens it: a photo without colour data starts
+                        // from its fitted camera look.
+                        let profiles = rawmakase::camera_look::with_default(
+                            &input,
                             &r.metadata,
-                            &rawmakase::camera_profiles::installed(&r.metadata).0,
-                        )
+                            rawmakase::camera_profiles::installed(&r.metadata).0,
+                            &AtomicBool::new(false),
+                        );
+                        Recipe::with_profiles(&r.metadata, &profiles)
                     })
             };
             if let Some(e) = exposure {
@@ -582,6 +623,46 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string(&check)?);
             }
         }
+        Some(Command::FitLook {
+            files,
+            report,
+            drop_matrix,
+        }) => {
+            use rawmakase::camera_look::{FitInputs, fit};
+            let inputs = FitInputs { drop_matrix };
+            for path in &files {
+                let result = fit(path, &inputs, &AtomicBool::new(false));
+                let (measured, outcome) = match &result {
+                    Ok(f) => (Some(&f.report), format!("{:?} look", f.report.kind)),
+                    Err(e) => (e.report.as_deref(), format!("refused: {}", e.reason)),
+                };
+                if report {
+                    // A file that could not even be opened still gets its line.
+                    let mut line = match measured {
+                        Some(r) => serde_json::to_value(r)?,
+                        None => serde_json::json!({
+                            "refusal": result.as_ref().err().map(|e| e.reason.clone()),
+                        }),
+                    };
+                    if let Some(o) = line.as_object_mut() {
+                        o.insert("file".into(), path.display().to_string().into());
+                    }
+                    println!("{line}");
+                } else {
+                    let scores = measured.map_or(String::new(), |r| {
+                        // The look used, else the first tried.
+                        let shown = r
+                            .candidates
+                            .iter()
+                            .find(|c| Some(c.kind) == r.kind)
+                            .or(r.candidates.first());
+                        let fitted = shown.map_or(f32::NAN, |c| c.scores.de00);
+                        format!(" (held-out ΔE00 {:.2} → {fitted:.2})", r.baseline.de00)
+                    });
+                    println!("{}: {outcome}{scores}", path.display());
+                }
+            }
+        }
         Some(Command::Benchmark { input, iterations }) => {
             anyhow::ensure!(
                 (1..=1000).contains(&iterations),
@@ -698,7 +779,8 @@ fn sync_folder(
             rawmakase::catalog::MetadataDefaults::load(),
             rawmakase::photo::camera_exif,
             rawmakase::photo::raw_xmp,
-        ),
+        )
+        .with_options(rawmakase::catalog::ImportOptions::load()),
     )?;
     for s in &applied.skipped {
         println!("skipped: {} ({})", shown(&s.path), s.reason);
@@ -816,6 +898,80 @@ fn save_stage(
         std::io::Write::flush(&mut writer)?;
         Ok(())
     })
+}
+
+/// `rawmakase lensfun`.
+fn lensfun(command: LensfunCommand) -> Result<()> {
+    use rawmakase::lens::lensfun::{choice, installed};
+    use rawmakase::lensfun_install::{self as install, Installed, Progress, Source};
+    let dir = installed::dir();
+    let terms = || {
+        println!(
+            "Lensfun lens database by {}, {} ({}), from {}",
+            choice::ATTRIBUTION,
+            choice::LICENSE,
+            choice::LICENSE_URI,
+            install::ARCHIVE_URL
+        )
+    };
+    let progress = Progress::default();
+    match command {
+        LensfunCommand::Status => {
+            match install::current(&dir) {
+                Some(m) => println!(
+                    "Installed: version {} ({}), {} lenses, {} cameras, downloaded {} from {}, SHA-256 {}",
+                    m.version,
+                    m.date(),
+                    m.lenses,
+                    m.cameras,
+                    m.downloaded,
+                    m.url,
+                    m.sha256
+                ),
+                None => println!("Not installed"),
+            }
+            println!("Folder: {}", dir.display());
+            terms();
+        }
+        LensfunCommand::Install { from } => {
+            if from.is_none()
+                && let Some(m) = install::current(&dir)
+            {
+                println!(
+                    "Version {} ({}) is installed; `rawmakase lensfun update` installs a newer one",
+                    m.version,
+                    m.date()
+                );
+                return Ok(());
+            }
+            terms();
+            let source = from.map_or(Source::Lensfun, Source::File);
+            match install::install(&dir, &source, &progress)? {
+                Installed::New(m) => println!(
+                    "Installed version {} ({}): {} lenses, {} cameras",
+                    m.version,
+                    m.date(),
+                    m.lenses,
+                    m.cameras
+                ),
+                Installed::Current(m) => {
+                    println!("Version {} ({}) is already installed", m.version, m.date())
+                }
+            }
+        }
+        LensfunCommand::Update => match install::install(&dir, &Source::Lensfun, &progress)? {
+            Installed::New(m) => println!("Updated to version {} ({})", m.version, m.date()),
+            Installed::Current(m) => println!("Up to date: version {} ({})", m.version, m.date()),
+        },
+        LensfunCommand::Remove => {
+            if install::remove(&dir, &progress)? {
+                println!("Removed; edits keep the Lensfun corrections they use");
+            } else {
+                println!("Not installed");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

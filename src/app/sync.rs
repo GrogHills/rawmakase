@@ -492,6 +492,7 @@ fn prepare(
         image: None,
     };
     let (profiles, _) = crate::camera_profiles::installed(&metadata);
+    let profiles = crate::camera_look::with_default(&target.path, &metadata, profiles, cancel);
     let record = catalog.edit_record(target.id)?;
     let resolved = edits::resolve(&record, &target.path, &metadata, &profiles, defaults)?;
     let starting_warnings = starting_warnings(resolved.origin, resolved.warnings);
@@ -647,6 +648,8 @@ fn photo_settings(
         .with_context(|| format!("{} can't be read", photo.name))?;
     let metadata = opened.metadata().clone();
     let (profiles, _) = crate::camera_profiles::installed(&metadata);
+    let profiles =
+        crate::camera_look::with_default(&photo.path, &metadata, profiles, &Default::default());
     let record = catalog.edit_record(photo.id)?;
     let resolved = edits::resolve(&record, &photo.path, &metadata, &profiles, defaults)?;
     let warnings = starting_warnings(resolved.origin, resolved.warnings);
@@ -856,8 +859,8 @@ impl Editor {
                 .and_then(capture_stops)
                 .is_none()
         {
-            self.status =
-                "Match Total Exposures needs this photo's aperture, shutter speed and ISO".into();
+            self.messages
+                .warn("Match Total Exposures needs this photo's aperture, shutter speed and ISO");
             return;
         }
         let targets = self.sync_targets();
@@ -954,11 +957,11 @@ impl Editor {
         if !self.activity.begin_sync(progress.clone()) {
             return;
         }
-        self.status = format!(
+        self.messages.note(format!(
             "{} on {}…",
             change.name(),
             super::widgets::plural(targets.len(), "photo", "photos")
-        );
+        ));
         std::thread::spawn(move || {
             // A panic (in Upright's analysis, say) still finishes the batch.
             let result = finished(
@@ -993,7 +996,7 @@ impl Editor {
             self.load_raw(path, Some(open));
         }
     }
-    /// A finished Sync: one command for Undo, and a status line naming what failed.
+    /// A finished Sync: one command for Undo, and the top bar naming what failed.
     pub(super) fn synced(&mut self, result: SyncResult) {
         self.activity.finish_sync();
         // A result for a catalog no longer open must not reach this one's undo log.
@@ -1001,7 +1004,10 @@ impl Editor {
             return;
         }
         if result.cancelled {
-            self.status = format!("{} cancelled: no photo changed", result.change.name());
+            self.messages.note(format!(
+                "{} cancelled: no photo changed",
+                result.change.name()
+            ));
             return;
         }
         let done = result.synced.len();
@@ -1036,7 +1042,13 @@ impl Editor {
         for note in &result.notes {
             status.push_str(&format!(" · {}: {}", note.name, note.note));
         }
-        self.status = status;
+        if !result.failed.is_empty() && done == 0 {
+            self.messages.fail(status);
+        } else if !result.failed.is_empty() || !result.notes.is_empty() {
+            self.messages.warn(status);
+        } else {
+            self.messages.done(status);
+        }
     }
 }
 

@@ -704,6 +704,56 @@ fn the_display_render_replays_the_stages_after_the_scene_stage() {
         assert_eq!(shown, color_stage(profile_stage(scene, &r), &r, &lut, None));
     }
 }
+/// A camera without colour data (no matrix, no profile) renders through no profile:
+/// its camera RGB as sRGB through a luminance shoulder, on the CPU only. Pinned so
+/// a fitted default (Camera Look) can only change it on purpose.
+#[test]
+fn a_camera_without_colour_data_renders_through_no_profile() {
+    let im = fixture();
+    let r = Recipe::with_profiles(&im.metadata, &[]);
+    assert!(r.profile.is_none());
+    assert!(!super::pixel_params::supported(&r));
+    let pro = mul(crate::camera_profiles::RGB_TO_PRO, [0.4, 0.2, 0.1]);
+    let out = profile_stage(pro, &r);
+    let y = crate::color::luminance([0.4, 0.2, 0.1]);
+    let k = 1. / (y + 0.82);
+    for (got, want) in out.iter().zip([0.4 * k, 0.2 * k, 0.1 * k]) {
+        assert!((got - want).abs() < 1e-5, "{out:?}");
+    }
+}
+/// The camera input stage is the decoder's samples times the white balance, through
+/// the render's geometry: bright channels keep what the sensor recorded, where
+/// highlight reconstruction pulls them (a fitted camera matrix must not learn it).
+#[test]
+fn the_camera_input_stage_is_before_highlight_reconstruction() -> anyhow::Result<()> {
+    let mut im = fixture();
+    im.pixels[13] = [0.8, 0.5, 0.4];
+    let r = Recipe {
+        wb: [1.5, 1., 0.8],
+        ..Default::default()
+    };
+    let camera = crate::develop::quality::render_stage(
+        &im,
+        &r,
+        crate::develop::quality::Stage::CameraInput,
+        &std::sync::atomic::AtomicBool::new(false),
+    )?;
+    assert_eq!([camera.width, camera.height], [12, 8]);
+    for (got, p) in camera.pixels.iter().zip(&im.pixels) {
+        let want: [f32; 3] = std::array::from_fn(|c| p[c] * r.wb[c]);
+        assert!(
+            got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-6),
+            "{got:?} {want:?}"
+        );
+    }
+    let recovered =
+        crate::develop::quality::recovered(&im, &std::sync::atomic::AtomicBool::new(false))?;
+    assert_ne!(
+        recovered.pixels[13], im.pixels[13],
+        "the bright colour is reconstructed"
+    );
+    Ok(())
+}
 /// The scene stage reads nothing computed after it: settings applied after the stage
 /// leave its output unchanged.
 #[test]
@@ -1534,11 +1584,13 @@ fn profile_recipe(setup: crate::lens::choice::LensProfileSetup, filename: &str) 
         lens_profile: true,
         lens_profile_choice: crate::lens::choice::LensProfileChoice {
             setup,
-            id: (!filename.is_empty()).then(|| crate::lens::choice::LensProfileId {
-                name: String::new(),
-                filename: filename.into(),
-                digest: String::new(),
-                embedded: false,
+            id: (!filename.is_empty()).then(|| {
+                crate::lens::choice::LensProfileRef::Adobe(crate::lens::choice::LensProfileId {
+                    name: String::new(),
+                    filename: filename.into(),
+                    digest: String::new(),
+                    embedded: false,
+                })
             }),
         },
         ..Default::default()
@@ -1552,7 +1604,7 @@ fn lens_profile_choice_round_trips_and_is_omitted_by_default() {
     let json = serde_json::to_value(Recipe::default()).unwrap();
     assert!(json.get("lens_profile_choice").is_none());
     let mut r = profile_recipe(LensProfileSetup::Custom, "Mine 35mm F2.lcp");
-    r.lens_profile_choice.id.as_mut().unwrap().digest = "0123ABCD".into();
+    r.lens_profile_choice.adobe_mut().unwrap().digest = "0123ABCD".into();
     let back: Recipe = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
     assert_eq!(back.lens_profile_choice, r.lens_profile_choice);
     assert!(back.unknown.is_empty());
@@ -1672,7 +1724,7 @@ fn a_missing_named_lens_profile_is_reported() {
     let im = lens_photo();
     let m = &im.metadata;
     let mut custom = profile_recipe(LensProfileSetup::Custom, "Gone.lcp");
-    custom.lens_profile_choice.id.as_mut().unwrap().name = "Adobe (Gone)".into();
+    custom.lens_profile_choice.adobe_mut().unwrap().name = "Adobe (Gone)".into();
     assert_eq!(
         custom.missing_lens_profile(m).as_deref(),
         Some("Lens profile \"Adobe (Gone)\" isn't imported; no lens correction")
@@ -2276,4 +2328,42 @@ fn stripe_ca_guard_keeps_isolated_edges_resolved_colour_and_noise() {
         }
         assert!(changed < 44 * 172 / 20, "noise pixels changed: {changed}");
     }
+}
+
+/// A Lensfun lens the edit chose renders from its own copy of the calibration: the
+/// warp carries it, with lateral CA read at green's source radius, on the CPU and in
+/// the GPU's parameters, and with nothing installed.
+#[test]
+fn a_lensfun_choice_reaches_the_warp_and_the_gpu() {
+    use crate::lens::lensfun::fixture;
+    let metadata = fixture::photo();
+    assert!(metadata.lensfun.get().is_none());
+    let im = CameraImage {
+        width: metadata.width,
+        height: metadata.height,
+        pixels: vec![[0.2; 3]; (metadata.width * metadata.height) as usize],
+        metadata,
+        recovered: Default::default(),
+        fast: false,
+        scale_factor: 1.,
+        scale_clipped: 0,
+    };
+    let mut r = Recipe {
+        lens_profile: true,
+        lens_distortion: 2.,
+        ..Default::default()
+    };
+    r.lens_profile_choice.choose_lensfun(fixture::choice());
+    let warp = LensWarp::new(&im, &r).unwrap();
+    assert!(warp.map.lens.source.starts_with("Lensfun"));
+    assert!(warp.map.lens.chromatic_at_source);
+    assert_eq!(warp.map.amount, 2.);
+    assert!(warp.vignetting.is_some());
+    let mut tables = Vec::new();
+    let params = super::gpu_params::lens_gpu_params(&im, &r, 0, &mut tables);
+    assert_eq!(params[0], 2., "lateral CA at the source radius");
+    assert!(params[8] >= 0. && params[10] >= 0., "red and blue tables");
+    // Switched off, the edit renders no Lensfun correction.
+    r.lens_profile = false;
+    assert!(LensWarp::new(&im, &r).is_none_or(|w| !w.map.lens.source.starts_with("Lensfun")));
 }

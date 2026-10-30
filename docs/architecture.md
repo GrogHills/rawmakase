@@ -15,7 +15,7 @@ colour management (`raw`, `demosaic`, `photo`,
 and the full-size decode in `decode` and `decode_cache`, which uses the engine's
 highlight recovery); `crates/rawmakase-export` develops and writes exports with
 their watermarks over both; `crates/rawmakase-inference` is the one leaf that runs
-the subject selection model through a lazily loaded ONNX Runtime (pixels in,
+the selection models through a lazily loaded ONNX Runtime (pixels in,
 coverage out; it knows no other workspace crate, and no value, catalog or
 rendering crate can reach it, so saved masks render without any inference);
 `crates/rawmakase-remote` sits directly on inference alone — the optional
@@ -44,9 +44,10 @@ files should preserve.
 | `dng`, `tiff` | A DNG's rendering hints (embedded profile, baseline exposure, crop, opcodes) and the bounded TIFF reader behind them (`crates/rawmakase-tiff`, a leaf crate with no RAW knowledge, re-exported as `model::tiff`) | `dng.rs`, `rawmakase-tiff/src/lib.rs` |
 | `decode` | A photo's full-size image, made one way for Develop, prefetch, Reference View and export: the cache's copy, else a decode with highlights recovered and stored, as a `DecodePolicy` asks | `decode.rs` |
 | `decode_cache` | Disk cache of developed camera images, keyed by file identity, demosaic setting and build; the app shares one live size limit and folder across Develop, prefetch, Reference View, export and preview builds, persisted in its session | `decode_cache.rs` |
-| `camera_profiles` | DCP parsing and validation, camera transforms, RAWmakase's own profiles, profile library and camera matching, `.cube` LUTs imported as look profiles, DNG temperature/tint | `dcp.rs`, `library.rs`, `open.rs`, `cube_look.rs`, `reference.rs` |
-| `optics` | The lens correction model the renderer evaluates (vignetting, distortion and lateral CA as radial functions), and Adobe lens profiles (LCP) as data; depends only on `xml` | `mod.rs`, `lcp.rs` |
-| `lens` | Readers that fill the `optics` model: the tables cameras embed in their RAWs, imported Adobe LCPs and lateral CA measurement, plus profile selection | `embedded.rs`, `lcp.rs`, `auto_ca.rs`, `choice.rs` |
+| `camera_profiles` | DCP parsing and validation, camera transforms, RAWmakase's own profiles, profile library and camera matching, `.cube` LUTs imported as look profiles, fitted camera looks as profiles (built only; fitting is `camera_look`'s), DNG temperature/tint | `dcp.rs`, `library.rs`, `open.rs`, `cube_look.rs`, `fitted.rs`, `reference.rs` |
+| `camera_look` | Fitting Camera Look (fitted) to a RAW's embedded JPEG: preview choice, pairing with the photo's render, solvers and acceptance on held-out tiles, and the default fit of photos without colour data through its fit cache. In `rawmakase-decode`, as it opens RAWs and decodes their previews; the model only builds and checks what it finds, and the catalog, `xmp` and presets never fit (the app and export pass the default in with the photo's profiles) | `camera_look/` |
+| `optics` | The lens correction model the renderer evaluates (vignetting, distortion and lateral CA as radial functions), Adobe lens profiles (LCP) as data, and Lensfun calibrations as data with their evaluation for a photo; depends only on `xml` | `mod.rs`, `lcp.rs`, `lensfun.rs` |
+| `lens` | Readers that fill the `optics` model: the tables cameras embed in their RAWs, imported Adobe LCPs, Lensfun's database (read, matched, installed) and lateral CA measurement, plus profile selection; an edit's Lensfun lens carries its own copy of the calibration, so rendering never reads the database | `embedded.rs`, `lcp.rs`, `lensfun/`, `auto_ca.rs`, `choice.rs` |
 | `rendered` | Developed pixels as values: an output image, its histogram and clipping overlay, which the renderer produces and export and watermarks use; depends on nothing | `rendered.rs` |
 | `model` | What an edit is, as values shared by the renderer, the catalog and file formats: the `Recipe` with its validation (`ValidRecipe`), saved versions and migration, panel switches, and the settings it is made of: Effects, Heal and Clone, Red Eye, Point Color, masks, Transform with Upright, white balance from metadata, the image space positions are kept in (`image_frame.rs`), the sliders as parameters, the rules an edit follows and the setting groups Copy Settings, Sync and presets use. Depends on camera profiles, lenses and optics, never on rendering | `recipe.rs`, `valid.rs`, `saved_format.rs`, `panels.rs`, `operators.rs`, `effects.rs`, `masks.rs`, `transform.rs` |
 | `develop` | Rendering a recipe: geometry, color processing, the scene tone stage, curves, effects, local adjustments, detail rendering and the GPU port | `pipeline/`, `scene_tone/`, `quality/`, `geometry.rs`, `gpu/` |
@@ -70,6 +71,7 @@ files should preserve.
 | `platform` | OS integration: the Linux GVFS filesystem bridge, drives, the file manager, the browser, the system Trash file operations get (`trash::SystemTrash`, failing closed, and whether a drive has one; no policy), and the display's color management (macOS surface tagging, the Windows display profile) | `network.rs`, `volume.rs`, `reveal.rs`, `web.rs`, `trash.rs`, `display.rs` |
 | `diagnostics` | The system report a bug report asks for (Report an Issue…, `rawmakase system-info`): this build, the system probed once per process and what the window knew, as plain snapshots, with no path, user, file, catalog or profile name | `diagnostics.rs` |
 | `updates` | Release checks and self-update through fastframe-update; the notice itself is in `app` | `updates.rs` |
+| `lensfun_install` | Downloading, checking, publishing and removing Lensfun's lens database on request (never bundled, never fetched unasked); reading it is `lens::lensfun::installed`'s, the panels and the job thread are `app`'s | `lensfun_install.rs` |
 | `comparison` | Reproducible reference-image comparisons using the same develop APIs | `comparison.rs` |
 
 `color` holds shared numeric primitives (matrices, sRGB transfer, HSV) and the tone-curve
@@ -118,6 +120,25 @@ opening find it, into the reason the loader reports. Whether the Library shows a
 `Library::develops`: a RAW always, any other format once it has an edit, since
 its defaults reproduce the file. Preview builds and stored previews follow the
 same rule from the photo's edit record.
+
+`app::messages` owns what the app says to the user. `Editor::messages` is the one
+way to say it, and the Library's own `Messages` are taken on each frame. Each thing
+is said in one place and nothing is drawn over the photo. `note` (progress, small
+confirmations) stays in the status line. `done` (a result, briefly), `warn` (a
+refusal or partial result, longer; neither goes while the pointer is on it or the
+window is away) and `fail` (what the user asked for did not happen, until dismissed)
+show in the top bar after the progress, past a hairline: the worst and newest as a lamp, one line, and a cross on hover that dismisses them all (or Shift+Esc), a problem tinted once as it arrives. A click opens every message in full.
+They take no keys. Without the bar (the chrome hidden) they show small at the
+window's top. A failure a later event ends is posted with a `Topic` (`fail_on`) and
+`settle`d by that event, so a retried save neither repeats a dismissed message nor
+leaves a stale one.
+
+Work the user started shows in the same slot as a label over a sweeping line, once it
+has run for a moment. `Editor::running_work` reads it each frame from the state that
+owns the work (a `Task` and the like), so no call starts or ends it: it goes when the
+work ends, however it ends. New long work adds one line there. Work with a place of
+its own (an export's or scan's progress, a batch's window, a selection's tile, opening
+a photo's badge) is not said again.
 
 `app::monitor` owns the Monitor profile choice (System, sRGB or a chosen ICC
 profile) and resolves it, with what `platform::display` reports about the
@@ -313,10 +334,11 @@ kept for outside callers. `src/lib.rs` exports only the modules they use; the re
 are `pub(crate)`, and the desktop app exposes only `app::run`, so the
 compiler reports what in them nothing uses. The compatibility surface is the saved data: recipe and
 preset envelopes are versioned and migrated by `model::saved_format` (written as
-version 11, which releases before the one engine refuse); a catalog opens at
-versions 1 to 3 (others are refused, the file left unchanged), is upgraded to 3
-before a recipe is stored in it, and its schema only ever gains tables, applied
-idempotently on open; see [catalogs](catalogs.md#sqlite-format-versions-1-to-3).
+version 11, which releases before the one engine refuse, or 12 for a recipe naming a
+Lensfun lens, which releases before Lensfun refuse); a catalog opens at versions 1
+to 4 (others are refused, the file left unchanged), is upgraded to 3 before a recipe
+is stored in it and to 4 before a Lensfun choice is, and its schema only ever gains
+tables, applied idempotently on open; see [catalogs](catalogs.md#sqlite-format-versions-1-to-4).
 
 ## Validation
 
@@ -334,9 +356,11 @@ RAW development and exports use the existing CPU implementation.
 
 `develop::gpu` uses portable WGSL compute through wgpu: Metal on macOS, Vulkan
 on supported Linux drivers, including NVIDIA and AMD, and DirectX 12 on Windows.
-Windows leaves Vulkan out unless `WGPU_BACKEND` asks for it, because an Intel
-Vulkan driver crashed the app at launch where DirectX 12 worked (#623); the UI
-and a standalone processor share that choice (`gpu::backends`). On the desktop it shares the
+Windows leaves Vulkan out while a DirectX 12 device can be created, because an
+Intel Vulkan driver crashed the app at launch where DirectX 12 worked (#623). If
+that device fails, it tries Vulkan and then OpenGL before opening the window
+(#768); `WGPU_BACKEND` overrides all of this. The UI and a standalone processor
+share that choice (`gpu::backends`). On the desktop it shares the
 UI's wgpu device (eframe's), which the app creates with the storage limits previews
 need (`gpu::required_limits`) and a high-performance adapter. On Linux the window's
 adapter is the first GPU the system lists instead: the display's GPU, or the discrete

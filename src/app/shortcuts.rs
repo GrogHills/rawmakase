@@ -85,20 +85,21 @@ const STACKS: [Shortcut; 4] = [
     ("S", "Collapse / expand the stack"),
     ("Shift+S", "Move to the top of the stack"),
 ];
-const GENERAL: [Shortcut; 11] = [
+const GENERAL: [Shortcut; 12] = [
     ("G", "Library"),
     ("D", "Develop"),
     ("Tab", "Hide / show the side panels"),
     ("Shift+Tab", "Hide / show the side panels and filmstrip"),
     ("F", "Hide all but the photo; grid first in the Library"),
     ("Esc", "Leave the whole-window mode"),
+    ("Shift+Esc", "Dismiss the messages in the top bar"),
     ("F7 / F8 / F6", "Left panel / right panel / filmstrip"),
     ("Shift+F8", "Fold / open Presets and History"),
     ("Cmd+'", "Create virtual copy"),
     ("Cmd+,", "Preferences"),
     ("Cmd+/", "These shortcuts"),
 ];
-const DEVELOP: [Shortcut; 53] = [
+const DEVELOP: [Shortcut; 54] = [
     ("R", "Crop & Straighten"),
     ("Return", "Finish the crop"),
     ("X", "Swap the crop's orientation"),
@@ -126,6 +127,7 @@ const DEVELOP: [Shortcut; 53] = [
     ("A", "Visualize spots"),
     ("Space", "Pan while a tool is open"),
     ("\\", "Before alone"),
+    ("Shift+\\", "Camera thumbnail (the embedded JPEG)"),
     ("Y", "Before and after, left and right"),
     ("Option+Y", "Before and after, top and bottom"),
     ("Shift+Y", "Before and after, split"),

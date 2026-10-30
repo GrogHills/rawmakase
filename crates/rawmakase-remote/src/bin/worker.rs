@@ -22,10 +22,13 @@ use std::sync::Arc;
 const USAGE: &str = "\
 rawmakase-remote-worker — run RAWmakase's selection models for another computer
 
-    rawmakase-remote-worker --model DIR [--listen ADDR] [--provider cpu|cuda|coreml]
-                            [--threads N] [--runtime-lib FILE]
+    rawmakase-remote-worker --model DIR [--sky-model DIR] [--listen ADDR]
+                            [--provider cpu|cuda|coreml] [--threads N]
+                            [--runtime-lib FILE]
 
     --model DIR        the installed models' folder (required)
+    --sky-model DIR    the installed sky model's folder (without it, Sky requests
+                       are refused; it holds about 2.5 GB while running)
     --listen ADDR      address to serve on (default 127.0.0.1:8765; the
                        loopback is deliberate — publish it only through an
                        SSH tunnel: `ssh -N -L 8765:127.0.0.1:8765 host`)
@@ -40,6 +43,7 @@ rawmakase-remote-worker — run RAWmakase's selection models for another compute
 
 fn main() -> ExitCode {
     let mut model = None;
+    let mut sky_model = None;
     let mut listen = String::from("127.0.0.1:8765");
     let mut provider = Provider::default();
     let mut threads = None;
@@ -56,6 +60,7 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "--model" => model = Some(PathBuf::from(value("--model"))),
+            "--sky-model" => sky_model = Some(PathBuf::from(value("--sky-model"))),
             "--listen" => listen = value("--listen"),
             "--provider" => {
                 provider = parse_provider(&value("--provider"))
@@ -101,11 +106,26 @@ fn main() -> ExitCode {
             model_dir.display()
         )),
     };
+    let engine = match &sky_model {
+        Some(dir) => match engine.with_sky(dir, &options) {
+            Ok(engine) => engine,
+            Err(e) => die(format!(
+                "the sky model at {} would not load: {e}",
+                dir.display()
+            )),
+        },
+        None => engine,
+    };
     let info = engine.describe();
     eprintln!(
-        "rawmakase-remote-worker: {} and {} on {}, serving on {}",
+        "rawmakase-remote-worker: {}, {} and {} on {}, serving on {}",
         info.model,
         info.panoptic,
+        if info.sky.is_empty() {
+            "no sky model"
+        } else {
+            &info.sky
+        },
         // Said by the runtime's own answer at load time: a requested
         // accelerator that could not be registered never got this far.
         info.provider,

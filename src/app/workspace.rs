@@ -1,6 +1,7 @@
 use super::Editor;
 use super::dialogs::{CatalogDialog, FolderAction};
 use super::library::PreviewsRequest;
+use super::messages::Topic;
 use super::panels::WorkspacePanel;
 use super::state::Tool;
 use super::widgets::{TOP_BAR_SEGMENTS, segment_bar};
@@ -17,7 +18,6 @@ impl Editor {
         self.preferences.open
             || self.export_modal()
             || self.modal.is_some()
-            || self.not_editable.is_some()
             || self.view.shortcuts
             || self.report_issue.is_open()
             || self.curve_save_open()
@@ -55,7 +55,8 @@ impl Editor {
             if self.library.is_some()
                 && let Err(error) = self.command_metadata(edit, None, advance)
             {
-                self.status = format!("Metadata could not be saved: {}", error.message);
+                self.messages
+                    .fail(format!("Metadata could not be saved: {}", error.message));
             }
         } else if self.module == Module::Library
             && let Some(library) = &mut self.library
@@ -69,6 +70,9 @@ impl Editor {
         let typing = ctx.text_edit_focused();
         self.control_commands(&ctx);
         self.events(&ctx);
+        self.take_library_messages();
+        let work = self.running_work();
+        self.messages.set_work(&ctx, work);
         self.poll_updates(&ctx);
         self.themes.poll(&ctx);
         // Checksums are read only while nothing heavier reads files.
@@ -76,10 +80,20 @@ impl Editor {
             || self.exporting()
             || self.load.is_running()
             || self.preview_builds.progress().is_some_and(|p| p.running());
+        // Bursts of photos added are stacked in the Library alone, with
+        // nothing over it and nothing else changing the catalog.
+        let stack_bursts = self.module == Module::Library
+            && !self.onboarding.visible
+            && !self.activity.is_busy()
+            && !self.workspace_modal()
+            && !self.close_confirm;
         if let Some(library) = &mut self.library {
             library.session.pause_checksums(busy);
             library.publish_shown();
             library.poll_previews(&ctx);
+            if stack_bursts {
+                library.make_import_stacks();
+            }
         }
         self.poll_preview_builds();
         // Entering a module draws its chrome: the whole-window mode belongs to
@@ -91,6 +105,9 @@ impl Editor {
         #[cfg(target_os = "macos")]
         self.native_menu_actions(&ctx);
         let modal = self.workspace_modal();
+        if !modal {
+            self.messages.dismiss_key(&ctx);
+        }
         if !modal {
             // Escape leaves the whole-window mode, as it does in Lightroom. It
             // is taken here, before the Library's views and Develop's tools, so
@@ -186,6 +203,9 @@ impl Editor {
         if let Some(removal) = self.library.as_mut().and_then(|l| l.take_removal_request()) {
             self.modal = Some(super::Modal::RemoveFolder(removal));
         }
+        if let Some(request) = self.library.as_mut().and_then(|l| l.take_export_request()) {
+            self.export_as_catalog(request);
+        }
         if let Some(ids) = self.library.as_mut().and_then(|l| l.take_read_request()) {
             self.modal = Some(super::Modal::ReadMetadata(ids));
         }
@@ -227,17 +247,17 @@ impl Editor {
         if let Some(library) = &mut self.library
             && library.take_reread_finished()
         {
-            self.status = library.message.clone();
+            self.messages.absorb(&mut library.messages);
             // Reading metadata can bring in the reference photo's Lightroom edit.
             self.load_reference();
         }
         self.remove_copy_window(&ctx);
         self.remove_folder_window(&ctx);
+        self.catalog_exported_window(&ctx);
         self.folder_sync_window(&ctx);
         self.discard_for_find_window(&ctx);
         self.read_metadata_window(&ctx);
         self.file_op_window(&ctx);
-        self.not_editable_window(&ctx);
         self.shortcuts_window(&ctx);
         self.report_issue_window(&ctx);
         self.copy_dialog_window(&ctx);
@@ -289,6 +309,15 @@ impl Editor {
         } else {
             LayoutEdit::Settled
         });
+        // Last, so a message from anything above shows this frame, over it all.
+        self.take_library_messages();
+        self.messages.show(&ctx);
+    }
+    /// What the Library said since last asked is said by the app.
+    pub(super) fn take_library_messages(&mut self) {
+        if let Some(library) = &mut self.library {
+            self.messages.absorb(&mut library.messages);
+        }
     }
     /// Saves the session when the window is maximized or restored. A minimized
     /// window keeps what it was: Windows reports it as not maximized.
@@ -776,10 +805,13 @@ impl Editor {
                     if self.activity.is_busy() {
                         super::widgets::spinner(ui, 14.);
                     }
+                    let start = ui.cursor().left();
                     self.export_progress(ui);
                     self.preview_build_progress(ui);
                     self.folder_sync_progress(ui);
                     self.file_op_progress(ui);
+                    self.messages.work_ui(ui);
+                    self.messages.line_ui(ui, ui.cursor().left() > start);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 0.;
                         ui.add_enabled_ui(!self.activity.is_busy(), |ui| {
@@ -857,7 +889,7 @@ impl Editor {
         if self.document.catalog_photo != Some(id) {
             ui.centered_and_justified(|ui| {
                 ui.label(
-                    egui::RichText::new(&self.status)
+                    egui::RichText::new(self.messages.line())
                         .color(theme::palette(ui.ctx()).tone(Tone::SECONDARY)),
                 );
             });
@@ -867,6 +899,7 @@ impl Editor {
         // stay in Develop.
         if self.view.tool != Tool::None
             || self.view.compare.shows_before()
+            || self.view.compare == super::before_after::Compare::CameraThumbnail
             || self.view.clipping != Default::default()
             || self.presets.preview.is_some()
         {
@@ -1252,23 +1285,18 @@ impl Editor {
             .frame(status_frame(ui))
             .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
-                if let Some(work) = &self.catalog_work {
-                    super::widgets::spinner(ui, 11.);
-                    ui.small(work);
-                } else {
-                    let shown = self
-                        .library
-                        .as_ref()
-                        .filter(|l| !l.message.is_empty())
-                        .map_or(self.status.as_str(), |l| l.message.as_str());
-                    status_text(ui, shown, self.message_detail(shown), None);
+                status_text(
+                    ui,
+                    self.messages.quiet_line(),
+                    self.messages.quiet_detail(),
+                    None,
+                );
                     if let Some(library) = &mut self.library
                         && library.offer_previous_import
                         && ui.small_button("Show").clicked()
                     {
                         library.show_previous_import();
                     }
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let toggle = ui
                         .checkbox(
@@ -1537,7 +1565,11 @@ impl Editor {
                 if i.key_pressed(egui::Key::J) && !i.modifiers.any() {
                     self.view.clipping.toggle_both();
                 }
-                if i.key_pressed(egui::Key::Backslash) {
+                // Shift+\\ arrives as | on most layouts.
+                let backslash = i.key_pressed(egui::Key::Backslash);
+                if i.key_pressed(egui::Key::Pipe) || (backslash && i.modifiers.shift) {
+                    self.toggle_camera_thumbnail();
+                } else if backslash {
                     let view = self
                         .view
                         .compare
@@ -1658,12 +1690,6 @@ impl Editor {
 
     /// The items a Library summary (sidecars that could not be read) lists
     /// on hover, while `message` is that summary.
-    fn message_detail(&self, message: &str) -> Option<&str> {
-        self.library
-            .as_ref()
-            .filter(|l| !l.message.is_empty() && l.message == message)
-            .and_then(|l| l.message_detail())
-    }
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("status")
             .exact_size(STATUS_HEIGHT)
@@ -1677,14 +1703,17 @@ impl Editor {
                             self.view.system_display.display()
                         )
                     );
+                    // A save's failure stays said here once dismissed from the bar.
+                    let save_error = self
+                        .document
+                        .edit
+                        .save_state()
+                        .message()
+                        .filter(|_| !self.messages.says(Topic::Save));
                     status_text(
                         ui,
-                        self.document
-                            .edit
-                            .save_state()
-                            .message()
-                            .unwrap_or(&self.status),
-                        self.message_detail(&self.status),
+                        save_error.unwrap_or(self.messages.quiet_line()),
+                        self.messages.quiet_detail(),
                         Some(&display),
                     );
                     if !self.preview.status.is_empty() {
@@ -1737,7 +1766,7 @@ impl Editor {
             let current = self.document.catalog_photo;
             let strip = library.filmstrip_panel(ui, current, crate::app::library::Module::Develop);
             if strip.metadata_changed {
-                self.status = library.message.clone();
+                self.messages.absorb(&mut library.messages);
             }
             // Cmd and Shift select, as in the Library, for Sync; otherwise a click
             // and Open in Develop show the photo.

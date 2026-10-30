@@ -29,6 +29,45 @@ impl Source {
     }
 }
 
+/// Where a RAW's colour matrix (`Metadata::cam_xyz`) comes from. A fact of the
+/// file and the build's camera table, read again on open and never saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MatrixSource {
+    /// None: no camera table row, and no matrix in the file or its maker notes.
+    #[default]
+    Absent,
+    /// The camera table's matrix from Adobe DNG Converter's output.
+    AdobeDng,
+    /// The camera table's matrix from RAWmakase's earlier decoder, for a camera
+    /// Adobe has none for.
+    CompatObserved,
+    /// The DNG's own ColorMatrix tags.
+    File,
+    /// The DNG's own ColorMatrix, of a tungsten calibration alone.
+    FileTungstenOnly,
+    /// The camera's maker notes (Olympus), with its D65 levels.
+    MakerNote,
+    /// A monochrome DNG's neutral colour, by definition.
+    Neutral,
+}
+
+/// What a DNG's embedded camera profile is to its photo: whether it has one, and
+/// whether RAWmakase can use it. Read again on open, never saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum EmbeddedProfileStatus {
+    /// No embedded profile (every RAW but a DNG, and DNGs without one).
+    #[default]
+    None,
+    /// Profile tags that do not parse as a camera profile, nor as colour matrices.
+    Unreadable,
+    /// Colour matrices without a forward matrix: matrix data, not a profile.
+    MatrixOnly,
+    /// A profile made for another camera than the photo's.
+    OtherCamera,
+    /// A profile for this camera (`Metadata::embedded_dcp`).
+    Usable,
+}
+
 /// A white-balance preset a camera stores for itself, as R, G, B multipliers.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -79,6 +118,18 @@ impl WhiteBalancePresets {
 pub struct Metadata {
     pub make: String,
     pub model: String,
+    /// The make and model as the file itself writes them (EXIF Make and Model, e.g.
+    /// "NIKON CORPORATION", "NIKON D6"), for matching Lensfun's camera entries, which
+    /// use them; `make` and `model` are RAWmakase's names. Read again on open, not
+    /// saved; empty when not read.
+    #[serde(skip)]
+    pub exif_make: String,
+    #[serde(skip)]
+    pub exif_model: String,
+    /// The frame's crop factor over the sensor's when the camera recorded only part
+    /// of it in a crop mode (Canon's APS-C mode: 1.6); read again on open, not saved.
+    #[serde(skip)]
+    pub sensor_crop: Option<f32>,
     pub width: u32,
     pub height: u32,
     pub raw_width: u32,
@@ -132,6 +183,17 @@ pub struct Metadata {
     /// LibRaw's XYZ(D65)-to-camera matrix, equivalent to a DNG ColorMatrix. Zero when unknown.
     #[serde(default)]
     pub cam_xyz: [[f32; 3]; 3],
+    /// Where `cam_xyz` comes from; read again on open, not saved.
+    #[serde(skip)]
+    pub matrix_source: MatrixSource,
+    /// The look the camera's JPEGs were made with, by the maker's name for it; read
+    /// again on open, not saved.
+    #[serde(skip)]
+    pub camera_look: Option<String>,
+    /// What the DNG's embedded camera profile is to this photo; read again on open,
+    /// not saved.
+    #[serde(skip)]
+    pub embedded_profile_status: EmbeddedProfileStatus,
     /// Built-in lens correction stored by the camera, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lens: Option<crate::optics::LensCorrection>,
@@ -184,6 +246,10 @@ pub struct Metadata {
     /// choices; rebuilt on open.
     #[serde(skip)]
     pub lens_profiles: crate::optics::lcp::PhotoProfiles,
+    /// The Lensfun database for choosing a Lensfun lens and resolving one an edit
+    /// names while editing: the one installed when asked for. Rendering never reads it.
+    #[serde(skip)]
+    pub lensfun: crate::lens::lensfun::installed::Handle,
     /// Lateral chromatic aberration measured from the decoded image, shared by every
     /// image made from it (see `crate::lens::auto_ca::prime`).
     #[serde(skip)]

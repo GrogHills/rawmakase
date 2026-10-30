@@ -37,13 +37,15 @@ const RGB_XYZ: [[f32; 3]; 3] = [
 pub(crate) fn apply(info: &mut RawInfo) {
     if info.monochrome {
         info.cam_xyz = RGB_XYZ;
+        info.matrix_source = crate::info::MatrixSource::Neutral;
         info.rgb_cam = std::array::from_fn(|i| std::array::from_fn(|j| f32::from(i == j)));
         info.pre_mul = [1.; 4];
         info.cam_mul = [1.; 4];
         return;
     }
     let linear = matches!(&info.plan, crate::variant::Plan::Dng(p) if p.samples > 1);
-    let table = crate::facts::matrix(&info.make, &info.model).filter(|_| !linear);
+    let table_row = crate::facts::matrix_with_source(&info.make, &info.model).filter(|_| !linear);
+    let table = table_row.map(|(m, _)| m);
     // A DNG whose white balance is a chromaticity, of a camera Adobe gives
     // its own matrix: the neutral through that matrix.
     if let (Some(m), Some([x, y])) = (table, info.as_shot_xy) {
@@ -57,8 +59,10 @@ pub(crate) fn apply(info: &mut RawInfo) {
             info.cam_mul[3] = info.cam_mul[1];
         }
     }
-    if let Some(m) = table.or(info.file_matrix) {
-        info.cam_xyz = m;
+    match (table_row, info.file_matrix) {
+        (Some((m, source)), _) => (info.cam_xyz, info.matrix_source) = (m, source),
+        (None, Some(m)) => (info.cam_xyz, info.matrix_source) = (m, info.file_matrix_source),
+        (None, None) => {}
     }
     match info.file_matrix.or(table).and_then(|m| from_cam_xyz(&m)) {
         Some((rgb_cam, pre_mul)) => {
@@ -261,16 +265,44 @@ mod tests {
         assert_eq!(info.pre_mul, [1.; 4]);
         assert_eq!(info.rgb_cam, [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]);
         assert_eq!(info.cam_xyz, [[0.; 3]; 3]);
+        assert_eq!(info.matrix_source, crate::MatrixSource::Absent);
         // A file's matrix: daylight from it.
         let m = [[0.5f32, 0., 0.], [0., 1., 0.], [0., 0., 0.25]];
         info.file_matrix = Some(m);
+        info.file_matrix_source = crate::MatrixSource::MakerNote;
         super::apply(&mut info);
+        assert_eq!(info.matrix_source, crate::MatrixSource::MakerNote);
         let (_, daylight) = super::from_cam_xyz(&m).unwrap();
         assert_eq!(
             info.pre_mul,
             [daylight[0], daylight[1], daylight[2], daylight[1]]
         );
         assert!(info.pre_mul.iter().all(|&v| v > 0.));
+    }
+
+    #[test]
+    fn a_table_matrix_says_which_table_rows_it_is() {
+        let mut info = crate::info::base(crate::Variant::MefPacked);
+        // A file's matrix gives way to the table's.
+        info.file_matrix = Some([[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]);
+        info.file_matrix_source = crate::MatrixSource::File;
+        for (make, model, source) in [
+            (
+                "Apple",
+                "iPhone11,6 back camera",
+                crate::MatrixSource::AdobeDng,
+            ),
+            ("Canon", "IXUS 160", crate::MatrixSource::CompatObserved),
+        ] {
+            (info.make, info.model) = (make.into(), model.into());
+            info.matrix_source = crate::MatrixSource::Absent;
+            super::apply(&mut info);
+            assert_eq!(info.matrix_source, source, "{model}");
+        }
+        // A monochrome DNG's neutral matrix is its definition.
+        info.monochrome = true;
+        super::apply(&mut info);
+        assert_eq!(info.matrix_source, crate::MatrixSource::Neutral);
     }
 
     #[test]

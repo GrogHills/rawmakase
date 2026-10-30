@@ -184,6 +184,7 @@ pub(super) enum Action {
     ToggleMono,
     Treatment(bool),
     Compare,
+    CameraThumbnail,
     Clipping,
     Zoom,
     Fit,
@@ -242,6 +243,7 @@ impl Action {
         ("treatment:bw", Self::Treatment(true)),
         ("treatment:color", Self::Treatment(false)),
         ("compare", Self::Compare),
+        ("camera_thumbnail", Self::CameraThumbnail),
         ("clipping", Self::Clipping),
         ("zoom", Self::Zoom),
         ("fit", Self::Fit),
@@ -372,7 +374,7 @@ impl Editor {
             .collect();
         State {
             protocol: PROTOCOL,
-            message: self.status.clone(),
+            message: self.messages.line().to_string(),
             mode: if self.module == Module::Library {
                 "library"
             } else {
@@ -451,7 +453,6 @@ impl Editor {
         self.preferences.open
             || self.export_modal()
             || self.modal.is_some()
-            || self.not_editable.is_some()
             || self.view.shortcuts
             || self.report_issue.is_open()
             || self.onboarding.visible
@@ -604,7 +605,8 @@ impl Editor {
                 let queued = self
                     .build_previews(&ids, kind)
                     .map_err(|e| Error::new("not_queued", e))?;
-                self.status = super::preview_build::queued_message(queued);
+                self.messages
+                    .note(super::preview_build::queued_message(queued));
                 return Ok(Outcome::Previews {
                     queued: queued.queued,
                     skipped: queued.skipped,
@@ -917,12 +919,12 @@ impl Editor {
             Previous => return self.command_navigate(-1),
             Panels(change) => {
                 if !self.request_panels(change) {
-                    return Err(Error::new("save_failed", self.status.clone()));
+                    return Err(Error::new("save_failed", self.messages.line().to_string()));
                 }
             }
             Chrome => {
                 if !self.toggle_chrome() {
-                    return Err(Error::new("save_failed", self.status.clone()));
+                    return Err(Error::new("save_failed", self.messages.line().to_string()));
                 }
             }
             Loupe => {
@@ -999,6 +1001,7 @@ impl Editor {
                             .compare
                             .toggled(super::before_after::Compare::BeforeOnly),
                     ),
+                    CameraThumbnail => self.toggle_camera_thumbnail(),
                     Clipping => self.view.clipping.toggle_both(),
                     Zoom => self.view.zoom.on = !self.view.zoom.on,
                     Fit => self.view.zoom.on = false,
@@ -1039,8 +1042,11 @@ impl Editor {
             return Err(Error::new("no_document", "No catalog photo is open"));
         };
         let next = next.map_err(|e| Error::new("save_failed", e.to_string()))?;
-        self.status = library.message.clone();
+        self.messages.absorb(&mut library.messages);
         self.sync_undo();
+        // The Library shows the photo made active itself; Develop follows it
+        // when the edit advanced or the filter hid the photo open.
+        let next = next.filter(|_| advance || self.module == Module::Develop);
         if let Some(next) = next {
             self.develop_catalog_photo(next);
             if self.document.catalog_photo != Some(next)

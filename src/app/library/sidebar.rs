@@ -210,7 +210,8 @@ impl Library {
                     .clicked()
                         && let Err(e) = self.show_quick()
                     {
-                        self.message = format!("Quick Collection unavailable: {e}");
+                        self.messages
+                            .warn(format!("Quick Collection unavailable: {e}"));
                     }
                     let imported = self.session.previous_import.len();
                     if imported > 0
@@ -322,6 +323,7 @@ impl Library {
                                         folders: HashSet::new(),
                                         photos: 0,
                                         empty_root: Some(root),
+                                        exported: None,
                                     });
                                 }
                                 Some(TreeAction::DropFolder {
@@ -339,8 +341,10 @@ impl Library {
                                 }
                                 Some(TreeAction::Reveal(path)) => {
                                     if let Err(e) = crate::platform::reveal::reveal(&path) {
-                                        self.message =
-                                            format!("Could not show {}: {e}", path.display());
+                                        self.messages.fail(format!(
+                                            "Could not show {}: {e}",
+                                            path.display()
+                                        ));
                                     }
                                 }
                                 Some(TreeAction::Drop {
@@ -356,6 +360,23 @@ impl Library {
                                         folders,
                                         photos,
                                         empty_root: None,
+                                        exported: None,
+                                    })
+                                }
+                                Some(TreeAction::ExportCatalog(name, folders, photos)) => {
+                                    let mut ids: Vec<_> = folders.iter().copied().collect();
+                                    ids.sort();
+                                    self.export_request = Some(super::CatalogExportRequest {
+                                        name: name.clone(),
+                                        scope: crate::catalog::ExportScope::Folders(ids),
+                                        removal: Some(super::FolderRemoval {
+                                            catalog: self.session.catalog.location().clone(),
+                                            name,
+                                            folders,
+                                            photos,
+                                            empty_root: None,
+                                            exported: None,
+                                        }),
                                     })
                                 }
                                 Some(TreeAction::ShowSubfolders(shown)) => {

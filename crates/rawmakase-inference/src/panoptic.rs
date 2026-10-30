@@ -1,7 +1,7 @@
-//! Reading the panoptic model's answer: which pixels are a person or an animal, and
-//! which are sky. The model returns a fixed number of "queries", each a class guess with
-//! a mask; the queries it is sure of compete for every pixel, as the model's authors
-//! decode it, and the winners' masks make the two maps. Pure: no runtime is involved.
+//! Reading the panoptic model's answer: which pixels are a person or an animal. The model
+//! returns a fixed number of "queries", each a class guess with a mask; the queries it is
+//! sure of compete for every pixel, as the model's authors decode it, and the winners'
+//! masks make the instances. Pure: no runtime is involved.
 use crate::auto::SIDE;
 use crate::error::InferenceError;
 use crate::manifest::PanopticSpec;
@@ -15,11 +15,9 @@ pub struct Instance {
     pub mask: Vec<f32>,
 }
 
-/// What the model found: each person and animal, largest first, and where the sky is
-/// (0..=1 on the [`SIDE`] grid).
+/// What the model found: each person and animal, largest first.
 pub struct Labels {
     pub instances: Vec<Instance>,
-    pub sky: Vec<f32>,
 }
 
 /// Fewest grid cells (of [`SIDE`]²) an instance must cover, so a few cells of noise
@@ -72,7 +70,6 @@ pub fn decode(
         }
     }
     let mut maps: Vec<Vec<f32>> = vec![vec![0f32; pixels]; sure.len()];
-    let mut sky = vec![0f32; pixels];
     for p in 0..pixels {
         let mut best = (0.0f32, None::<(usize, f32)>);
         for (k, &(q, _, confidence)) in sure.iter().enumerate() {
@@ -86,8 +83,6 @@ pub fn decode(
             let class = sure[k].1;
             if spec.is_subject(class) {
                 maps[k][p] = prob;
-            } else if class == spec.sky {
-                sky[p] = prob;
             }
         }
     }
@@ -117,10 +112,7 @@ pub fn decode(
     let area = |i: &Instance| i.mask.iter().filter(|v| **v > 0.5).count();
     instances.sort_by_key(|i| std::cmp::Reverse(area(i)));
     instances.truncate(MOST_INSTANCES);
-    Ok(Labels {
-        instances,
-        sky: grid(&sky),
-    })
+    Ok(Labels { instances })
 }
 
 #[cfg(test)]
@@ -153,20 +145,18 @@ mod tests {
     }
 
     #[test]
-    fn people_and_animals_are_instances_and_the_sky_label_is_the_sky() {
+    fn people_and_animals_are_instances_and_nothing_else_is() {
         let (logits, masks) = scene((1, 12.0), (187, 12.0));
         let labels = decode(&PANOPTIC, &logits, &masks, 3, CLASSES, 8, 4).unwrap();
         assert_eq!(labels.instances.len(), 1);
         let person = &labels.instances[0];
         assert_eq!(person.class, 1);
         assert!(at(&person.mask, 0.1, 0.5) > 0.95 && at(&person.mask, 0.9, 0.5) < 0.05);
-        assert!(at(&labels.sky, 0.9, 0.5) > 0.95 && at(&labels.sky, 0.1, 0.5) < 0.05);
         // An animal counts as a subject too, and a car is neither.
         let (logits, masks) = scene((18, 12.0), (3, 12.0));
         let labels = decode(&PANOPTIC, &logits, &masks, 3, CLASSES, 8, 4).unwrap();
         assert_eq!(labels.instances.len(), 1);
         assert_eq!(labels.instances[0].class, 18);
-        assert!(labels.sky.iter().all(|v| *v < 0.05));
     }
 
     #[test]
@@ -176,7 +166,6 @@ mod tests {
         logits[2] = 0.9;
         let labels = decode(&PANOPTIC, &logits, &masks, 3, CLASSES, 8, 4).unwrap();
         assert!(labels.instances.is_empty());
-        assert!(at(&labels.sky, 0.9, 0.5) > 0.95);
     }
 
     #[test]

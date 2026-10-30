@@ -459,6 +459,10 @@ pub fn transfer(
         group.copy(from, &mut recipe);
     }
     let m = target.metadata;
+    // A Lensfun lens takes the target's camera, which its correction is scaled for.
+    if selection.contains(SettingGroup::LensProfileCorrections) {
+        recipe.lens_profile_choice.for_photo(m);
+    }
     // RAW and rendered files keep white balance in different terms (Kelvin against
     // relative) and have profiles of their own: between them, the target keeps its
     // white balance and profile, and everything else transfers.
@@ -500,12 +504,17 @@ pub fn transfer(
     {
         // A profile file belongs to one photo's camera (or its DNG): use the target's of
         // that name, else the source's when it fits this camera, else keep the target's.
+        // A fitted camera look is the source photo's own, never another fit of its name.
         let name = profile.name.as_str();
-        match target
-            .profiles
-            .iter()
-            .find(|p| p.name == name && p.ensure_camera(m).is_ok())
-        {
+        let same_name = (!crate::camera_profiles::fitted::is_fitted(profile))
+            .then(|| {
+                target
+                    .profiles
+                    .iter()
+                    .find(|p| p.name == name && p.ensure_camera(m).is_ok())
+            })
+            .flatten();
+        match same_name {
             Some(p) => recipe.profile = Some(p.clone()),
             None if profile.ensure_camera(m).is_ok() => {}
             None => {
@@ -521,11 +530,12 @@ pub fn transfer(
     // sensor) is kept as the edit names it, and said, as on import.
     let embedded = recipe
         .lens_profile_choice
-        .id
-        .as_ref()
+        .adobe()
         .is_some_and(|id| id.embedded);
     if selection.contains(SettingGroup::LensProfileCorrections)
-        && (embedded || recipe.lens_profile_in_use(m).missing.is_some())
+        && (embedded
+            || recipe.lens_profile_in_use(m).missing.is_some()
+            || recipe.lensfun_in_use().is_some())
     {
         notes.extend(recipe.missing_lens_profile(m));
     }

@@ -53,6 +53,22 @@ pub fn cache_dir() -> PathBuf {
         .unwrap_or_else(|| home.join(".cache/rawmakase"))
 }
 
+/// The running executable's size and modification time: what a cache entry made
+/// by this build is keyed by, so another build never reads it.
+pub(crate) fn build_identity() -> String {
+    std::env::current_exe()
+        .and_then(fs::metadata)
+        .map(|m| {
+            let modified = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            format!("{}-{modified}", m.len())
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Debug)]
 pub struct DecodeCache {
     dir: Arc<RwLock<Dir>>,
@@ -165,20 +181,13 @@ impl DecodeCache {
     /// The key of `path` as the current build develops it at full size with `demosaic`.
     pub fn key(path: &Path, demosaic: Demosaic) -> Result<String> {
         let id = crate::storage::Identity::read(path)?;
-        let exe = std::env::current_exe()
-            .and_then(fs::metadata)
-            .map(|m| {
-                let modified = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_nanos());
-                format!("{}-{modified}", m.len())
-            })
-            .unwrap_or_default();
         Ok(format!(
-            "{}-{}-{}-{:?}-{exe}",
-            id.prefix_hash, id.size, id.modified_ns, demosaic
+            "{}-{}-{}-{:?}-{}",
+            id.prefix_hash,
+            id.size,
+            id.modified_ns,
+            demosaic,
+            build_identity()
         ))
     }
     fn file(&self, key: &str) -> PathBuf {

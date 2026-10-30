@@ -24,6 +24,13 @@ impl Own {
         let header = header(&info);
         Ok((Self { bytes, info }, header))
     }
+    /// The colour space the maker notes give the camera's JPEGs.
+    pub(super) fn preview_space(&self) -> Option<super::MakerPreviewSpace> {
+        self.info.preview_space.map(|s| match s {
+            rawmakase_raw::PreviewSpace::Srgb => super::MakerPreviewSpace::Srgb,
+            rawmakase_raw::PreviewSpace::AdobeRgb => super::MakerPreviewSpace::AdobeRgb,
+        })
+    }
     pub(super) fn thumbnail(&self) -> Result<Vec<u8>> {
         Ok(rawmakase_raw::preview(&self.info, &self.bytes)?.to_vec())
     }
@@ -93,7 +100,12 @@ impl Own {
             );
             let [_, _, w, h] = s.area;
             let grey = visible(&s, |_, _| 0);
-            return Ok(Some((w, h, grey.into_iter().map(|v| [v; 3]).collect())));
+            // Nothing interpolates a monochrome sample, so it is clipped here.
+            return Ok(Some((
+                w,
+                h,
+                grey.into_iter().map(|v| [v.max(0.); 3]).collect(),
+            )));
         }
         ensure!(
             s.channels >= 3,
@@ -143,7 +155,8 @@ impl Own {
 }
 
 /// The visible area of one-sample sensor data `s` as development reads it:
-/// (raw − black) / (white − black), at least 0, each sample's black that of
+/// (raw − black) / (white − black), negative below black (noise is clipped only
+/// after demosaicing, where interpolated samples carry less of it), each sample's black that of
 /// channel `channel(y, x)` plus its position's in the black pattern.
 fn visible(s: &rawmakase_raw::Sensor, channel: impl Fn(usize, usize) -> usize) -> Vec<f32> {
     let [left, top, w, h] = s.area.map(|v| v as usize);
@@ -165,7 +178,7 @@ fn visible(s: &rawmakase_raw::Sensor, channel: impl Fn(usize, usize) -> usize) -
         for (x, (dst, &v)) in data[y * w..(y + 1) * w].iter_mut().zip(src).enumerate() {
             let mut black = s.black[channel(y, x)] as f32;
             black += pattern_black(y, x) as f32;
-            *dst = ((f32::from(v) - black) / (white - black).max(1.)).max(0.);
+            *dst = (f32::from(v) - black) / (white - black).max(1.);
         }
     }
     data
@@ -275,6 +288,8 @@ fn header(i: &RawInfo) -> Header {
         make: i.make.clone(),
         model: i.model.clone(),
         normalized: [i.normalized_make.clone(), i.normalized_model.clone()],
+        file_names: [i.file_make.clone(), i.file_model.clone()],
+        sensor_crop: i.sensor_crop,
         // A Super CCD's image is its stored rows turned by 45°.
         width: i.super_ccd.map_or(i.width, |s| s.size()[0]),
         height: i.super_ccd.map_or(i.height, |s| s.size()[1]),
@@ -301,12 +316,29 @@ fn header(i: &RawInfo) -> Header {
         presets,
         matrix: i.rgb_cam,
         cam_xyz: i.cam_xyz,
+        matrix_source: matrix_source(i.matrix_source),
+        camera_look: i.camera_look.clone(),
         lens: i.lens.clone(),
         lens_id: i.lens_id,
         dng_version: i.dng_version,
         levels: i.levels,
         analog_balance: i.analog_balance,
         monochrome: i.monochrome,
+    }
+}
+
+/// The decoders' matrix provenance as the model names it.
+fn matrix_source(s: rawmakase_raw::MatrixSource) -> rawmakase_model::camera_data::MatrixSource {
+    use rawmakase_model::camera_data::MatrixSource as M;
+    use rawmakase_raw::MatrixSource as R;
+    match s {
+        R::Absent => M::Absent,
+        R::AdobeDng => M::AdobeDng,
+        R::CompatObserved => M::CompatObserved,
+        R::File => M::File,
+        R::FileTungstenOnly => M::FileTungstenOnly,
+        R::MakerNote => M::MakerNote,
+        R::Neutral => M::Neutral,
     }
 }
 

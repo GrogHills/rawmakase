@@ -38,6 +38,105 @@ fn develop_workspace_drains_library_preview_results() -> Result<()> {
 }
 
 #[test]
+fn manual_profile_import_keeps_only_the_unchanged_current_thumbnail() -> Result<()> {
+    use crate::app::bulk_import::{ImportKind, Summary};
+    for (new_defaults, missing_metadata, wrong_path, dirty) in [
+        (false, false, false, false),
+        (true, false, false, false),
+        (false, true, false, false),
+        (false, false, true, false),
+        (false, false, false, true),
+        (true, false, false, true),
+    ] {
+        let (_directory, mut library) = library_of(&["a.RAF", "b.RAF", "saved.RAF"])?;
+        let ctx = library.ctx.clone();
+        let photos = library.session.photos.clone();
+        let mut editor = crate::app::Editor::with_context(&ctx, None, Default::default(), None);
+        editor.presets.next_scan();
+        let metadata = crate::camera_data::Metadata {
+            make: "Test".into(),
+            model: "Import refresh".into(),
+            cam_xyz: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
+            ..Default::default()
+        };
+        editor.document.profiles = crate::camera_profiles::listed(&metadata).profiles;
+        editor.document.metadata = Some(metadata);
+        editor.refresh_photo_defaults();
+        if dirty {
+            editor.document.edit.setup_mut().exposure = 1.25;
+            editor.document.edit.save_state_mut().mark_changed();
+        }
+        let recipe = editor.document.edit.recipe().clone();
+        library.session.catalog.save_edit(
+            photos[2].id,
+            &photos[2].path,
+            &recipe,
+            &Default::default(),
+            crate::catalog::HistoryUpdate::Keep,
+        )?;
+        for photo in &photos {
+            library.update_edited(
+                &ctx,
+                photo.id,
+                image::RgbImage::from_pixel(4, 4, image::Rgb([30, 140, 250])),
+                serde_json::to_string(&recipe)?,
+            );
+        }
+        let current = photos[0].id;
+        let original = library.thumbnail(current).unwrap().id();
+        let saved = library.thumbnail(photos[2].id).unwrap().id();
+        assert!(!library.cache.thumbs.contains_key(&photos[0].path));
+        editor.document.catalog_photo = Some(current);
+        editor.document.path = Some(if wrong_path {
+            PathBuf::from("a-replaced-photo.RAF")
+        } else {
+            photos[0].path.clone()
+        });
+        editor.library = Some(Box::new(library));
+        if new_defaults {
+            editor.raw_defaults = std::sync::Arc::new(crate::raw_defaults::brighter_defaults());
+        }
+        if missing_metadata {
+            editor.document.metadata = None;
+            editor.document.defaults = None;
+        }
+        editor.imported(
+            Summary {
+                kind: ImportKind::CameraProfiles,
+                imported: 1,
+                already: 0,
+                without_base: 0,
+                failed: Vec::new(),
+                cubes: Vec::new(),
+            },
+            &ctx,
+        );
+        let library = editor.library.as_ref().unwrap();
+        assert_eq!(
+            library.thumbnail(current).map(egui::TextureHandle::id),
+            ((!new_defaults || dirty) && !missing_metadata && !wrong_path).then_some(original),
+            "only the unchanged, identified open photo keeps its render"
+        );
+        assert!(library.thumbnail(photos[1].id).is_none());
+        assert_eq!(
+            library.thumbnail(photos[2].id).map(egui::TextureHandle::id),
+            Some(saved)
+        );
+        assert_eq!(
+            editor.document.edit.recipe().exposure,
+            if new_defaults && !dirty {
+                0.7
+            } else {
+                recipe.exposure
+            }
+        );
+        assert!(editor.document.edit.history().steps().0.is_empty());
+        assert_eq!(editor.document.edit.save_state().needs_save(), dirty);
+    }
+    Ok(())
+}
+
+#[test]
 fn find_on_disk_is_offered_for_one_offline_photo() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let folder = directory.path().join("photos");
@@ -72,6 +171,32 @@ fn find_on_disk_is_offered_for_one_offline_photo() -> Result<()> {
     Ok(())
 }
 
+/// What adding a folder had to skip is not said as a success, and its list stays
+/// reachable for longer than a result's.
+#[test]
+fn a_folder_added_with_something_skipped_is_a_warning() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("library.rawmakase");
+    Catalog::create(&path)?;
+    let mut library = Library::load(&path, egui::Context::default())?;
+    let report = crate::catalog::SidecarReport {
+        unreadable: vec![("a.xmp".into(), "not XML".into())],
+        ignored: Vec::new(),
+    };
+    crate::app::folder_locations::folder_added(&mut library, &report, &[]);
+    assert_eq!(
+        library.messages.level(),
+        crate::app::messages::Level::Warning
+    );
+    assert!(
+        library
+            .messages
+            .detail()
+            .is_some_and(|d| d.contains("a.xmp"))
+    );
+    Ok(())
+}
+
 #[test]
 fn develop_says_why_it_cannot_open_a_photo() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -92,16 +217,19 @@ fn develop_says_why_it_cannot_open_a_photo() -> Result<()> {
     editor.module = Module::Library;
     editor.develop_catalog_photo(photo.id);
     assert!(editor.module == Module::Develop);
-    assert!(editor.not_editable.is_none());
+    assert!(!editor.messages.has_entry_with("can't be opened"));
     assert_eq!(editor.document.catalog_photo, Some(photo.id));
     // Back in the Library, the file goes offline.
     editor.module = Module::Library;
     std::fs::remove_file(folder.join("a.jpg"))?;
     editor.develop_catalog_photo(photo.id);
     assert!(editor.module == Module::Library);
-    let (title, reason) = editor.not_editable.clone().unwrap();
-    assert_eq!(title, "a.jpg can't be opened in Develop");
-    assert!(reason.contains("offline"));
+    assert!(
+        editor
+            .messages
+            .has_entry_with("a.jpg can't be opened: The photo is offline")
+    );
+    assert!(!editor.workspace_modal(), "it doesn't stop anything");
     Ok(())
 }
 
@@ -136,9 +264,11 @@ fn an_unsupported_jpeg_says_why_in_develop() -> Result<()> {
     editor.develop_catalog_photo(photo.id);
     assert!(editor.module == Module::Library);
     assert!(!editor.load.is_running());
-    let (title, reason) = editor.not_editable.clone().expect("the dialog");
-    assert_eq!(title, "print.jpg can't be opened in Develop");
-    assert_eq!(reason, "RAWmakase can't edit CMYK images");
+    assert!(
+        editor
+            .messages
+            .has_entry("print.jpg can't be opened: RAWmakase can't edit CMYK images")
+    );
     Ok(())
 }
 
@@ -176,7 +306,7 @@ fn a_heic_opens_in_develop_and_an_hdr_one_says_why_not() -> Result<()> {
     editor.module = Module::Library;
     editor.develop_catalog_photo(heic.id);
     assert!(editor.module == Module::Develop);
-    assert!(editor.not_editable.is_none());
+    assert!(!editor.messages.has_entry_with("can't be opened"));
     assert_eq!(editor.document.catalog_photo, Some(heic.id));
     Ok(())
 }
@@ -228,10 +358,10 @@ fn develop_steps_past_a_photo_it_cannot_edit() -> Result<()> {
     editor.navigate(1);
     assert!(editor.module == Module::Develop);
     assert_eq!(editor.document.catalog_photo, Some(c));
-    assert!(editor.not_editable.is_none());
+    assert!(!editor.messages.has_entry_with("can't be opened"));
     editor.navigate(-1);
     assert_eq!(editor.document.catalog_photo, Some(a));
-    assert!(editor.not_editable.is_none());
+    assert!(!editor.messages.has_entry_with("can't be opened"));
     Ok(())
 }
 
@@ -245,9 +375,11 @@ fn develop_says_why_when_only_photos_it_cannot_edit_follow() -> Result<()> {
     editor.develop_catalog_photo(a);
     editor.navigate(1);
     assert_eq!(editor.document.catalog_photo, Some(a));
-    let (title, reason) = editor.not_editable.clone().expect("the dialog");
-    assert_eq!(title, "b.jpg can't be opened in Develop");
-    assert_eq!(reason, "RAWmakase can't edit CMYK images");
+    assert!(
+        editor
+            .messages
+            .has_entry("b.jpg can't be opened: RAWmakase can't edit CMYK images")
+    );
     let _ = (b, c);
     Ok(())
 }
@@ -618,7 +750,7 @@ fn a_folder_can_show_only_its_own_photos() -> Result<()> {
     // Removing a folder of folders shown alone shows All Photographs.
     library.click_folder(&key("trip"), Click::Replace, &[]);
     let trip_folders = library.folder_ids(&key("trip"), true).unwrap();
-    library.remove_folders(&trip_folders, "trip")?;
+    library.remove_folders(&trip_folders, "trip", None)?;
     assert_eq!(library.source_key(), "");
     assert_eq!(shown(&library), "deep.RAF one.RAF top.RAF");
 
@@ -857,7 +989,7 @@ fn the_online_count_follows_photos_removed_from_the_catalog() -> Result<()> {
         .map(|f| f.id)
         .collect();
     assert_eq!(b.len(), 1);
-    l.remove_folders(&b, "b")?;
+    l.remove_folders(&b, "b", None)?;
     assert_eq!(l.available_count(), 2);
     Ok(())
 }
@@ -883,10 +1015,11 @@ fn folders_with_no_photo_online_are_counted_once_the_check_is_in() -> Result<()>
     let mut l = Library::load(&db, egui::Context::default())?;
     l.wait_for_availability();
     assert!(
-        l.message
+        l.messages
+            .line()
             .starts_with("1 folder isn't found on this computer"),
         "{}",
-        l.message
+        l.messages.line()
     );
     Ok(())
 }
@@ -1346,6 +1479,9 @@ fn an_edited_preview_from_develop_outranks_renders_in_flight() -> Result<()> {
     ));
     let newest = library.cache.edited_requested[&id];
     assert!(newest > first);
+    // Keeping the current render through an import must also keep its ticket:
+    // an older skipped completion still cannot remove it.
+    library.set_defaults_preserving(Default::default(), Some(id));
     library.cache.edits_pending = 1;
     result_tx.send(previews::EditResult::Skipped(id, first))?;
     library.poll_previews(&ctx);
@@ -1579,7 +1715,7 @@ fn a_rejected_range_leaves_the_unflagged_view_in_one_write() -> Result<()> {
     library.edit_selection(crate::app::photo_metadata::Edit::Flag(-1), false)?;
     assert_eq!(visible_names(&library), ["a.RAF", "e.RAF"]);
     assert_eq!(library.selected(), Some(ids[4]));
-    assert_eq!(library.message, "3 photos · Reject");
+    assert_eq!(library.messages.line(), "3 photos · Reject");
     let saved = library.session.catalog.photos()?;
     assert_eq!(saved.iter().filter(|p| p.flag == -1).count(), 3);
     // One failing photo saves none of the batch.
@@ -3954,9 +4090,9 @@ fn grouping_a_collapsed_stack_takes_all_of_its_photos() -> Result<()> {
     // A single photo is no stack.
     library.stack_action(StackAction::Group, vec![a]);
     assert!(
-        library.message.contains("two photos"),
+        library.messages.line().contains("two photos"),
         "{}",
-        library.message
+        library.messages.line()
     );
     Ok(())
 }
@@ -3978,12 +4114,163 @@ fn auto_stack_stacks_runs_of_the_source_in_one_undoable_command() -> Result<()> 
     }
     assert_eq!(library.auto_stacks(60.), [vec![a, b], vec![c, d]]);
     assert_eq!(library.auto_stacks(25.), [vec![a, b]]);
-    library.auto_stack_now(60.)?;
+    library.auto_stack_now(library.auto_stacks(60.))?;
     assert_eq!(library.shown(), [a, c]);
     let done = library.take_stack_done();
     assert_eq!(done.len(), 1);
     library.restore_stacks(&done[0].before)?;
     assert_eq!(library.shown(), [a, b, c, d]);
+    Ok(())
+}
+
+#[test]
+fn auto_stack_groups_camera_bursts_as_the_camera_numbered_them() -> Result<()> {
+    use crate::exif::sequence_fixture::sony_raw;
+    let (d, mut library, ids) =
+        stack_library(&["a.ARW", "b.ARW", "c.ARW", "d.ARW", "e.ARW", "f.ARW"])?;
+    let [a, b, c, e, f, x] = ids[..] else {
+        panic!()
+    };
+    // Two bursts half a second apart, a single shot, and a photo whose
+    // camera says nothing, all within a minute.
+    let files = [
+        (a, sony_raw("1", 1), "2024-03-02T10:00:00.000"),
+        (b, sony_raw("1", 2), "2024-03-02T10:00:00.200"),
+        (c, sony_raw("1", 1), "2024-03-02T10:00:00.700"),
+        (e, sony_raw("1", 2), "2024-03-02T10:00:00.900"),
+        (f, sony_raw("1", 0), "2024-03-02T10:00:05.000"),
+        (x, b"fixture".to_vec(), "2024-03-02T10:00:10.000"),
+    ];
+    for photo in &mut library.session.photos {
+        let (_, bytes, time) = files.iter().find(|(id, ..)| *id == photo.id).unwrap();
+        std::fs::write(&photo.path, bytes)?;
+        photo.captured = (*time).into();
+    }
+    assert_eq!(library.auto_stacks(60.), [vec![a, b, c, e, f, x]]);
+    let mut dialog = super::stacks::AutoStack::default();
+    dialog.bursts = true;
+    finish_sequences(&mut library, &mut dialog, crate::exif::sequence);
+    assert_eq!(library.auto_stacks_of(&dialog), [vec![a, b], vec![c, e]]);
+    library.auto_stack_now(library.auto_stacks_of(&dialog))?;
+    assert_eq!(library.shown(), [a, c, f, x]);
+    let done = library.take_stack_done();
+    assert_eq!(done.len(), 1, "one undo step");
+    library.restore_stacks(&done[0].before)?;
+    assert_eq!(library.shown(), [a, b, c, e, f, x]);
+    library.restore_stacks(&done[0].after)?;
+    assert_eq!(library.shown(), [a, c, f, x]);
+    // What the files said is kept: a new window reads none of them again.
+    library.restore_stacks(&done[0].before)?;
+    let mut again = super::stacks::AutoStack::default();
+    again.bursts = true;
+    finish_sequences(&mut library, &mut again, |_| panic!("read again"));
+    assert!(again.can_stack());
+    assert_eq!(library.auto_stacks_of(&again), [vec![a, b], vec![c, e]]);
+    // A file replaced in place is read again; one offline stacks by time,
+    // and what was read of it stays for when it is back.
+    let paths: std::collections::HashMap<PhotoId, std::path::PathBuf> = library
+        .session
+        .photos
+        .iter()
+        .map(|p| (p.id, p.path.clone()))
+        .collect();
+    let path = |id| paths[&id].clone();
+    std::fs::write(path(e), sony_raw("22", 0))?;
+    std::fs::remove_file(path(f))?;
+    let mut again = super::stacks::AutoStack::default();
+    again.bursts = true;
+    finish_sequences(&mut library, &mut again, crate::exif::sequence);
+    assert_eq!(library.auto_stacks_of(&again), [vec![a, b], vec![f, x]]);
+    let stored = library.session.catalog.sequences()?;
+    assert_eq!(
+        stored[&e].sequence.as_ref().map(|s| &s.mark),
+        Some(&crate::exif::Mark::Single)
+    );
+    assert_eq!(
+        stored[&f].sequence.as_ref().map(|s| &s.mark),
+        Some(&crate::exif::Mark::Single)
+    );
+    // A file whose contents can't be read now, though its size and time
+    // can, is never saved as saying nothing: allowed again with the same
+    // stamp, it is read.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let denied =
+            |mode| std::fs::set_permissions(path(c), std::fs::Permissions::from_mode(mode));
+        library
+            .session
+            .catalog
+            .db_for_tests()
+            .execute("DELETE FROM photo_sequences WHERE photo=?", [c.0])?;
+        denied(0o000)?;
+        // Root reads it anyway.
+        if std::fs::read(path(c)).is_err() {
+            let mut again = super::stacks::AutoStack::default();
+            again.bursts = true;
+            finish_sequences(&mut library, &mut again, crate::exif::sequence);
+            assert!(!library.session.catalog.sequences()?.contains_key(&c));
+        }
+        denied(0o644)?;
+        let mut again = super::stacks::AutoStack::default();
+        again.bursts = true;
+        finish_sequences(&mut library, &mut again, crate::exif::sequence);
+        assert_eq!(
+            library.session.catalog.sequences()?[&c]
+                .sequence
+                .as_ref()
+                .map(|s| &s.mark),
+            Some(&crate::exif::Mark::Frame(1))
+        );
+    }
+    drop(d);
+    Ok(())
+}
+
+/// Runs Group Camera Bursts' check of the candidates to its end, each file
+/// read by `read`.
+fn finish_sequences(
+    library: &mut Library,
+    dialog: &mut super::stacks::AutoStack,
+    read: fn(&std::path::Path) -> Option<crate::exif::Sequence>,
+) {
+    let start = std::time::Instant::now();
+    while library.read_sequences_by(dialog, read) {
+        assert!(start.elapsed().as_secs() < 30, "reading never finished");
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn auto_stack_checks_bursts_again_under_a_new_generation_and_never_stacks_after_a_lost_read()
+-> Result<()> {
+    let (_d, mut library, ids) = stack_library(&["a.ARW", "b.ARW"])?;
+    let [a, b] = ids[..] else { panic!() };
+    for photo in &mut library.session.photos {
+        photo.captured = "2024-03-02T10:00:00".into();
+    }
+    let mut dialog = super::stacks::AutoStack::default();
+    dialog.bursts = true;
+    // The worker is lost before reading anything: nothing counts as read,
+    // so the photos aren't stacked by time in its stead.
+    finish_sequences(&mut library, &mut dialog, |_| panic!("worker lost"));
+    assert!(!library.read_sequences(&mut dialog));
+    assert!(!dialog.can_stack(), "a lost read blocks Stack");
+    // Unticking and ticking again reads them again; by time when the
+    // cameras say nothing.
+    dialog.bursts = false;
+    assert!(!library.read_sequences(&mut dialog));
+    dialog.bursts = true;
+    finish_sequences(&mut library, &mut dialog, |_| None);
+    assert!(dialog.can_stack());
+    assert_eq!(library.auto_stacks_of(&dialog), [vec![a, b]]);
+    // A new structural generation checks them again, against what the
+    // catalog kept: their files are unchanged, so none is read.
+    library.session.bump_generation();
+    assert!(library.read_sequences_by(&mut dialog, |_| panic!("read again")));
+    finish_sequences(&mut library, &mut dialog, |_| panic!("read again"));
+    assert!(dialog.can_stack());
+    assert_eq!(library.auto_stacks_of(&dialog), [vec![a, b]]);
     Ok(())
 }
 

@@ -87,7 +87,6 @@ impl Engine for Fake {
         Ok(Outcome {
             key: self.photo.key.clone(),
             subject: self.photo.subject.clone(),
-            sky: self.photo.sky.clone(),
         })
     }
 
@@ -111,10 +110,27 @@ impl Engine for Fake {
         Ok(self.photo.subject.clone())
     }
 
+    fn sky(&mut self, _photo: &RgbImage, cancel: &AtomicBool) -> Result<Coverage, EngineError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        if let Some(holding) = &self.holding {
+            while holding.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Err(EngineError::Cancelled);
+        }
+        if let Some(fail) = self.fail.clone() {
+            return Err(fail);
+        }
+        Ok(self.photo.sky.clone())
+    }
+
     fn describe(&self) -> rawmakase_remote::server::Info {
         rawmakase_remote::server::Info {
             model: "fake@0".into(),
             panoptic: "fake-panoptic".into(),
+            sky: "fake-sky@0".into(),
             provider: "CPU".into(),
         }
     }
@@ -164,7 +180,10 @@ fn a_selection_round_trips_and_a_second_one_reuses_the_analysis() {
     let analysis = session.analyze(&photo(4, 3), &cancel).unwrap();
     assert_eq!(&analysis.key, "k1");
     assert_eq!(analysis.subject.clone().data, vec![200; 12]);
-    assert_eq!(analysis.sky.clone().data, vec![201; 12]);
+    assert_eq!(
+        session.sky(&photo(4, 3), &cancel).unwrap().data,
+        vec![201; 12]
+    );
 
     let mask = session
         .segment(&analysis, &click(0.5, 0.5), &cancel)
@@ -172,8 +191,8 @@ fn a_selection_round_trips_and_a_second_one_reuses_the_analysis() {
     assert_eq!(mask, analysis.subject);
     assert_eq!(
         runs.load(Ordering::SeqCst),
-        2,
-        "analyze and segment; a ping runs no model"
+        3,
+        "analyze, sky and segment; a ping runs no model"
     );
 }
 
@@ -239,7 +258,6 @@ fn a_stale_click_after_the_worker_forgot_the_photo_asks_for_it_again() {
     let stale = rawmakase_remote::RemoteAnalysis {
         key: "gone".into(),
         subject: analysis.subject.clone(),
-        sky: analysis.sky.clone(),
     };
     assert_eq!(
         session.segment(&stale, &click(0.5, 0.5), &cancel),
@@ -305,11 +323,6 @@ fn two_sessions_never_confuse_each_others_requests_or_cancels() {
                     height: 2,
                     data: vec![7; 4],
                 },
-                sky: Coverage {
-                    width: 2,
-                    height: 2,
-                    data: vec![9; 4],
-                },
             })
         }
         fn segment(
@@ -320,10 +333,18 @@ fn two_sessions_never_confuse_each_others_requests_or_cancels() {
         ) -> Result<Coverage, EngineError> {
             Err(EngineError::UnknownKey)
         }
+        fn sky(
+            &mut self,
+            _photo: &RgbImage,
+            _cancel: &AtomicBool,
+        ) -> Result<Coverage, EngineError> {
+            Err(EngineError::UnknownKey)
+        }
         fn describe(&self) -> rawmakase_remote::server::Info {
             rawmakase_remote::server::Info {
                 model: "fake@0".into(),
                 panoptic: "fake".into(),
+                sky: String::new(),
                 provider: "CPU".into(),
             }
         }
@@ -566,11 +587,6 @@ fn a_duplicate_live_id_is_refused() {
                     height: 2,
                     data: vec![1; 4],
                 },
-                sky: Coverage {
-                    width: 2,
-                    height: 2,
-                    data: vec![2; 4],
-                },
             })
         }
         fn segment(
@@ -581,10 +597,18 @@ fn a_duplicate_live_id_is_refused() {
         ) -> Result<Coverage, EngineError> {
             Err(EngineError::UnknownKey)
         }
+        fn sky(
+            &mut self,
+            _photo: &RgbImage,
+            _cancel: &AtomicBool,
+        ) -> Result<Coverage, EngineError> {
+            Err(EngineError::UnknownKey)
+        }
         fn describe(&self) -> rawmakase_remote::server::Info {
             rawmakase_remote::server::Info {
                 model: "fake@0".into(),
                 panoptic: "fake".into(),
+                sky: String::new(),
                 provider: "CPU".into(),
             }
         }
@@ -874,4 +898,49 @@ fn a_cancel_is_forwarded_even_when_the_request_notices_it_first() {
         .recv_timeout(Duration::from_secs(5))
         .expect("the cancel was forwarded");
     assert!(!target.is_empty());
+}
+
+#[test]
+fn sky_runs_by_itself_with_no_analysis_before_it() {
+    let (endpoint, _, runs) = worker(Fake::of(Photo::of("k1", 2, 2, 50)));
+    let session = RemoteSession::new(&endpoint);
+    let cancel = AtomicBool::new(false);
+    // Sky by itself: one model run, nothing kept for it to depend on.
+    assert_eq!(
+        session.sky(&photo(2, 2), &cancel).unwrap().data,
+        vec![51; 4]
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert_eq!(session.ping().unwrap().sky, "fake-sky@0");
+}
+
+#[test]
+fn a_cancelled_sky_is_cancelled_and_a_worker_without_the_model_says_why() {
+    let mut fake = Fake::of(Photo::of("k1", 2, 2, 50));
+    let holding = Arc::new(AtomicBool::new(true));
+    fake.holding = Some(holding.clone());
+    let (endpoint, _, _) = worker(fake);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let raised = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        raised.store(true, Ordering::SeqCst);
+    });
+    assert_eq!(
+        RemoteSession::new(&endpoint).sky(&photo(2, 2), &cancel),
+        Err(ClientError::Cancelled)
+    );
+    holding.store(false, Ordering::SeqCst);
+
+    let mut fake = Fake::of(Photo::of("k1", 2, 2, 50));
+    fake.fail = Some(EngineError::Failed(
+        rawmakase_inference::InferenceError::ModelInvalid(
+            "this worker has no sky model; start it with --sky-model".into(),
+        ),
+    ));
+    let (endpoint, _, _) = worker(fake);
+    match RemoteSession::new(&endpoint).sky(&photo(2, 2), &AtomicBool::new(false)) {
+        Err(ClientError::Failed(why)) => assert!(why.contains("--sky-model"), "{why}"),
+        other => panic!("{other:?}"),
+    }
 }

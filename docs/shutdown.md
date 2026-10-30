@@ -68,13 +68,21 @@ that drops it.
 | Checksum reader | `catalog_session/checksums.rs` | Reading one file in 1 MiB chunks, possibly on a network share; the rate limit's sleeps; a pause | The reader's cancel, between chunks and while paused | No: a stalled share can hang a read |
 | Volume probe | `app/library/volumes.rs` | Each root's mount (`statfs`, the volume's name, mountinfo or `GetVolumePathNameW`), whether each drive is mounted and its free space; writing `drives.json` | None (one check per thread) | No: it can hang on a stalled mount |
 | Subject selection | `app/subject_mask/worker.rs` | A job: the input render, then the photo's analysis (a few seconds: embedding, saliency, a grid of decodes) when not kept, then a decode for a click — locally, or over the remote worker, where every wait is a bounded socket read (at most 3 min) and the cancel flag is forwarded to the worker, which stops its model run; it keeps its session until it ends | Its cancel flag, raised at exit and forwarded mid-request; its mailbox dropped | Yes, under the deadline; the thread owns the runtime, which is never unloaded under a running call, and no socket wait outlasts the deadline without the cancel ending it |
-| Selection model install | `app/subject_mask/models.rs` | HTTP for five files, as requests resuming where the file stopped (connect 20 s, 30 s per response, 60 s for each body in total, 2 min each request) and file writes, in 256 KB chunks | Its cancel flag, between chunks and requests, and while waiting for another window's install | Yes, under the deadline; a partial download is kept for the next install to resume, under the folder's install lock |
+| Selection model install | `app/subject_mask/models.rs` | One thread per pack (Subject's five files, Sky's one). HTTP for its files, as requests resuming where the file stopped (connect 20 s, 30 s per response, 60 s for each body in total, 2 min each request) and file writes, in 256 KB chunks | Its cancel flag, between chunks and requests, and while waiting for another window's install | Yes, under the deadline; a partial download is kept for the next install to resume, under the folder's install lock |
+| Lensfun profiles | `app/lensfun.rs` (the work is `lensfun_install.rs`) | One job: `versions.json` and the archive over HTTPS (connect 20 s, 30 s per response, 60 s for the body, 2 min each request), unpacking and checking it in memory, writing one version folder and the manifest; or removing the folder; or waiting for another instance's install lock (at most 5 min) | Its cancel flag, between download chunks, archive entries and files written, before the version folder is renamed and before the manifest is written, and while waiting for the lock | Yes, under the deadline; a cancel before the manifest leaves the version in use, and a crash leaves a staging folder the next install removes |
 | Availability check | `app/library/availability.rs` | File metadata for every photo | None | No, for the same reason |
 | Update checker | `app/updates.rs` | Up to an hour between checks; a check or download of up to 15 min | Its request sender dropped, between requests | No: a download has no cancel |
 | Installation probe | `diagnostics.rs` | `updates::installation()`, which can run the package manager | None; the system probe stops waiting for it after 10 s and reports it unavailable | No |
 | GVFS bridge reaper (Linux) | `platform/network.rs` | The bridge process, which outlives the app | None | Never |
 
-One-shot jobs stay detached: Auto, Upright, Auto straighten, the Point Color and
+The Develop loader, Reference View, Library previews, preview builds, exports and
+Sync also fit the default Camera Look of a photo without colour data, once per file
+and build (seconds; a fit cache hit otherwise, and nothing for every other photo).
+The fit takes the job's cancel flag inside its renders and between its stages, so it
+stops as a decode does; a fit stopped that way is neither used nor cached.
+
+One-shot jobs stay detached: Auto, Upright, Auto straighten, Profile → Fit Camera
+Look, the Point Color and
 Targeted Adjustment samples, the onboarding scan, catalog open and import, file
 dialogs, bulk import, the preset scan, batch edits (Sync Settings, Auto Settings or a
 preset on the Library's selection; their Cancel is taken between photos and right

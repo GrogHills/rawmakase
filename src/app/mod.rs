@@ -98,7 +98,8 @@ pub(crate) struct Editor {
     /// How the Library showed its photos, as last written to the session;
     /// returned to whenever the catalog is loaded.
     saved_layout: crate::app::session::LibraryLayout,
-    status: String,
+    /// What the status line and the top bar say.
+    messages: messages::Messages,
     /// What a running catalog import or open is doing.
     catalog_work: Option<String>,
     /// Progress of a running profile or preset import.
@@ -116,15 +117,13 @@ pub(crate) struct Editor {
     close_anyway: bool,
     /// The dialog blocking the editor, if one is open.
     modal: Option<Modal>,
-    /// A photo Develop could not open and why, until the user dismisses it.
-    /// Its own field: a photo dropped on the window can be refused while
-    /// a `modal` is open.
-    not_editable: Option<(String, String)>,
     /// Cmd+Z across Library and Develop.
     undo_log: undo::UndoLog,
     /// Select Subject and Select Background: the running selection, the selection
     /// model's install and what the drawer asks.
     selection: subject_mask::Selection,
+    /// Lensfun's lens database: installing, updating and removing it.
+    lensfun: lensfun::Lensfun,
     /// Photo > Auto Advance, saved in the session.
     auto_advance: bool,
     /// Synchronize Folder: the scan under way or the plan waiting for review.
@@ -148,6 +147,10 @@ pub(crate) struct Editor {
     /// Preferences > Raw Defaults, ready to apply; shared with the loader and the
     /// Library's previews.
     raw_defaults: std::sync::Arc<crate::raw_defaults::DevelopDefaults>,
+    /// The profile library as unedited photos' previews were last built from
+    /// (`camera_profiles::library_fingerprint`): read at start and after every
+    /// profile import, rather than scanned for each preview.
+    profile_library: String,
     /// Shared automation queue and independently configured input adapters.
     controls: automation::Hub,
     automation: commands::Automation,
@@ -182,7 +185,7 @@ impl Editor {
         editor.controls = automation::Hub::start(&cc.egui_ctx);
         // 1:1 previews left unused past the chosen time go, as in Lightroom.
         editor.expire_previews();
-        editor.updates.launched(launch, &mut editor.status);
+        editor.updates.launched(launch, &mut editor.messages);
         cc.egui_ctx
             .all_styles_mut(|style| text.apply_to_visuals(&mut style.visuals));
         editor.themes.text = text;
@@ -341,7 +344,7 @@ impl Editor {
             last_path: session.last_path.clone(),
             prefetch_cancel: Default::default(),
             demosaic: session.demosaic,
-            status: "Pick a photo in the Library to begin".into(),
+            messages: messages::Messages::starting_with("Pick a photo in the Library to begin"),
             catalog_work: None,
             importing: None,
             close_confirm: false,
@@ -349,9 +352,9 @@ impl Editor {
             quit_by: None,
             close_anyway: false,
             modal: None,
-            not_editable: None,
             undo_log: Default::default(),
             selection: Default::default(),
+            lensfun: lensfun::Lensfun::suggesting(!session.no_lensfun_suggestions),
             auto_advance: session.auto_advance,
             folder_sync: Default::default(),
             file_ops: Default::default(),
@@ -366,6 +369,7 @@ impl Editor {
             raw_defaults: std::sync::Arc::new(crate::raw_defaults::DevelopDefaults::load(
                 session.raw_defaults.clone(),
             )),
+            profile_library: crate::camera_profiles::library_fingerprint(),
             controls: automation::Hub::inactive(),
             automation: commands::Automation::default(),
         };
@@ -412,6 +416,7 @@ impl Editor {
                     auto_advance: self.auto_advance,
                     no_auto_black_white_mix: self.first_conversion
                         == treatment::FirstConversion::KeepMix,
+                    no_lensfun_suggestions: !self.lensfun.suggest,
                     pause_checksums: self.checksums_paused,
                     library_layout: self.saved_layout.clone(),
                     copy_groups: Some(self.copy_groups.clone()),
@@ -510,6 +515,8 @@ enum Modal {
     RemoveCopy(PhotoId),
     /// The folder waiting for the user to confirm its removal from the catalog.
     RemoveFolder(library::FolderRemoval),
+    /// What Export as Catalog wrote, and what it could not carry.
+    CatalogExported(Box<export_catalog::Exported>),
     /// Photos waiting for the user to confirm Read Metadata from Files.
     ReadMetadata(Vec<PhotoId>),
     /// A folder change waiting for the user's answer.
@@ -671,26 +678,43 @@ fn run_window(path: Option<PathBuf>, launch: crate::updates::Launch) -> anyhow::
     }
 }
 /// Why eframe gave up, e.g. on a GPU it could not start. `run_native` returned
-/// that error; on our own event loop eframe only logs it.
+/// that error; on our own event loop eframe only logs it. wgpu calls most driver
+/// failures "Parent device is lost" and only logs the call that failed (#768).
 struct EframeErrors;
 static EFRAME_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static DRIVER_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 impl EframeErrors {
     fn take() -> Option<String> {
-        EFRAME_ERROR
+        let error = EFRAME_ERROR
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+            .take()?;
+        let driver = DRIVER_ERROR
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        Some(match driver {
+            Some(driver) => format!("{error}\n\n{driver}"),
+            None => error,
+        })
     }
 }
 impl log::Log for EframeErrors {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Error && metadata.target().starts_with("eframe")
+        metadata.level() <= log::Level::Error
+            && (metadata.target().starts_with("eframe")
+                || metadata.target().starts_with("wgpu_hal"))
     }
     fn log(&self, record: &log::Record) {
         if !self.enabled(record.metadata()) {
             return;
         }
-        if let Some(error) = record
+        if record.target().starts_with("wgpu_hal") {
+            *DRIVER_ERROR
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(record.args().to_string());
+        } else if let Some(error) = record
             .args()
             .to_string()
             .strip_prefix("Exiting because of error: ")
@@ -864,6 +888,8 @@ mod before_after;
 mod brush_scroll;
 mod bulk_import;
 pub use bulk_import::import_profiles;
+mod camera_look;
+mod camera_thumbnail;
 mod catalog;
 mod chrome;
 mod clipping;
@@ -876,16 +902,21 @@ mod design;
 mod dialogs;
 mod display;
 mod export;
+mod export_catalog;
+#[cfg(test)]
+mod export_catalog_tests;
 mod file_ops;
 pub(crate) mod folder_locations;
 mod folder_sync;
 mod guided_tool;
 mod history_panel;
 mod inspector;
+mod lensfun;
 pub(crate) mod library;
 mod lut_import;
 mod magnifier;
 mod mask_tool;
+mod messages;
 mod minimap;
 mod monitor;
 mod naming;

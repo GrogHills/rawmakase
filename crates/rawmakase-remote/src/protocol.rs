@@ -15,7 +15,7 @@ use std::io::{self, Read, Write};
 
 /// The protocol this build speaks. A worker that answers with another version
 /// is refused, not half understood.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The largest frame accepted, in either direction: two coverages of the
 /// largest raster the renderer stores (4096 × 4096, base64) plus room for the
@@ -54,6 +54,13 @@ pub enum Op {
     Segment {
         key: String,
         prompt: WirePrompt,
+    },
+    /// The photo's sky, from its own model.
+    Sky {
+        width: u32,
+        height: u32,
+        #[serde(with = "base64_bytes")]
+        pixels: Vec<u8>,
     },
     Cancel {
         target: String,
@@ -111,14 +118,18 @@ pub enum Reply {
     Ping {
         model: String,
         panoptic: String,
+        /// The sky model, empty when the worker was started without one.
+        sky: String,
         provider: String,
     },
     Analyze {
         key: String,
         subject: WireCoverage,
-        sky: WireCoverage,
     },
     Segment {
+        coverage: WireCoverage,
+    },
+    Sky {
         coverage: WireCoverage,
     },
     /// A `cancel` was noted; whether it stopped anything is said by the request
