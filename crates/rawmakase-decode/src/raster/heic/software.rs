@@ -237,9 +237,8 @@ fn to_rgb(picture: &hevc::Picture, nclx: Option<Nclx>) -> Result<Vec<u8>> {
             let mut rgb = vec![0u16; stride as usize * h as usize];
             let image = planar(planes, w, h, cw);
             match (depth, picture.subsampled) {
-                (10, true) => yuv::i010_to_rgb10_bilinear(&image, &mut rgb, stride, range, m),
+                (10 | 12, true) => avif::deep420_to_rgb(&image, depth, &mut rgb, range, m),
                 (10, false) => yuv::i410_to_rgb10(&image, &mut rgb, stride, range, m),
-                (12, true) => yuv::i012_to_rgb12_bilinear(&image, &mut rgb, stride, range, m),
                 (12, false) => yuv::i412_to_rgb12(&image, &mut rgb, stride, range, m),
                 _ => bail!("{depth}-bit HEIF images are not supported"),
             }
