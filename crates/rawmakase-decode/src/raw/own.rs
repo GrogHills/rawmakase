@@ -24,6 +24,13 @@ impl Own {
         let header = header(&info);
         Ok((Self { bytes, info }, header))
     }
+    /// The colour space the maker notes give the camera's JPEGs.
+    pub(super) fn preview_space(&self) -> Option<super::MakerPreviewSpace> {
+        self.info.preview_space.map(|s| match s {
+            rawmakase_raw::PreviewSpace::Srgb => super::MakerPreviewSpace::Srgb,
+            rawmakase_raw::PreviewSpace::AdobeRgb => super::MakerPreviewSpace::AdobeRgb,
+        })
+    }
     pub(super) fn thumbnail(&self) -> Result<Vec<u8>> {
         Ok(rawmakase_raw::preview(&self.info, &self.bytes)?.to_vec())
     }
@@ -309,12 +316,29 @@ fn header(i: &RawInfo) -> Header {
         presets,
         matrix: i.rgb_cam,
         cam_xyz: i.cam_xyz,
+        matrix_source: matrix_source(i.matrix_source),
+        camera_look: i.camera_look.clone(),
         lens: i.lens.clone(),
         lens_id: i.lens_id,
         dng_version: i.dng_version,
         levels: i.levels,
         analog_balance: i.analog_balance,
         monochrome: i.monochrome,
+    }
+}
+
+/// The decoders' matrix provenance as the model names it.
+fn matrix_source(s: rawmakase_raw::MatrixSource) -> rawmakase_model::camera_data::MatrixSource {
+    use rawmakase_model::camera_data::MatrixSource as M;
+    use rawmakase_raw::MatrixSource as R;
+    match s {
+        R::Absent => M::Absent,
+        R::AdobeDng => M::AdobeDng,
+        R::CompatObserved => M::CompatObserved,
+        R::File => M::File,
+        R::FileTungstenOnly => M::FileTungstenOnly,
+        R::MakerNote => M::MakerNote,
+        R::Neutral => M::Neutral,
     }
 }
 

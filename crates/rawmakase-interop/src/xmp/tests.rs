@@ -2076,3 +2076,143 @@ fn a_preset_says_whether_it_measures_the_photo() -> Result<()> {
     }
     Ok(())
 }
+/// A fitted camera look travels whole in sidecars and presets and comes back
+/// exactly, at its Amount, without any profile of its name installed; one that is
+/// missing, damaged or for another camera is refused, never refitted or replaced.
+#[test]
+fn a_fitted_look_round_trips_whole() -> Result<()> {
+    use crate::camera_profiles::fitted;
+    let m = Metadata {
+        make: "Test".into(),
+        model: "Camera".into(),
+        cam_xyz: [[0.8, -0.2, -0.1], [-0.3, 1.1, 0.2], [-0.05, 0.15, 0.6]],
+        wb: [1.; 3],
+        daylight_wb: [1.; 3],
+        ..Default::default()
+    };
+    let mut look = fitted::FittedLook::identity();
+    for (i, node) in look.table.iter_mut().enumerate() {
+        *node = [
+            ((i * 7919) % 41) as f32 - 20.,
+            1. + (i % 11) as f32 / 50.,
+            1.,
+        ];
+    }
+    let profile = fitted::with_look(&fitted::standard_base(&m).unwrap(), &look)?;
+    let mut r = Recipe::with_profiles(&m, &[]);
+    r.profile = Some(std::sync::Arc::new(profile.clone()));
+    r.profile_amount = 1.5;
+    let photo = crate::xmp::write::Photo {
+        raw_name: "IMG.RAW".into(),
+        settings: true,
+        format: "image/jpeg".into(),
+        ..Default::default()
+    };
+    let packet = crate::xmp::write::packet(&r, &m, &photo);
+    assert!(packet.contains("rawmakase:FittedProfile=\"v1:"), "{packet}");
+    assert!(packet.contains(&format!(
+        "crs:CameraProfile=\"{}\"",
+        crate::camera_profiles::open::STANDARD
+    )));
+    let base = Recipe::with_profiles(&m, &[]);
+    let back = parse(Path::new("photo.xmp"), &packet)?.apply(&base, &m, &[], None)?;
+    assert_eq!(back.profile.as_deref(), Some(&profile));
+    assert_eq!(back.profile_amount, 1.5);
+    // A preset of Treatment & Profile carries it too.
+    use crate::model::settings_groups::{GroupInclusion, GroupSelection, SettingGroup};
+    let mut groups = GroupSelection::none();
+    groups.set(SettingGroup::TreatmentAndProfile, GroupInclusion::Included);
+    let info = crate::xmp::preset_write::PresetInfo::new("Fitted", "User Presets");
+    let preset = crate::xmp::preset_write::preset(&r, &m, &info, &groups);
+    let back = parse(Path::new("fitted.xmp"), &preset)?.apply(&base, &m, &[], None)?;
+    assert_eq!(back.profile.as_deref(), Some(&profile));
+    // Another camera, a damaged profile, or none: refused.
+    let other = Metadata {
+        model: "Other".into(),
+        ..m.clone()
+    };
+    assert!(
+        parse(Path::new("p.xmp"), &packet)?
+            .apply(&base, &other, &[], None)
+            .is_err()
+    );
+    let start = packet.find("rawmakase:FittedProfile=\"v1:").unwrap() + 30;
+    let mut damaged = packet.clone();
+    damaged.replace_range(start..start + 20, "00000000000000000000");
+    assert!(
+        parse(Path::new("p.xmp"), &damaged)?
+            .apply(&base, &m, &[], None)
+            .is_err()
+    );
+    let end = packet[start..].find('"').unwrap() + start;
+    let mut missing = packet.clone();
+    missing.replace_range(packet.find("rawmakase:FittedProfile").unwrap()..end + 1, "");
+    assert!(
+        parse(Path::new("p.xmp"), &missing)?
+            .apply(&base, &m, &[], None)
+            .is_err()
+    );
+    let (lenient, warnings) =
+        parse(Path::new("p.xmp"), &missing)?.apply_lenient(&base, &m, &[], None)?;
+    assert_eq!(lenient.profile, base.profile, "the photo keeps its profile");
+    assert!(
+        warnings.iter().any(|w| w.contains("fitted")),
+        "{warnings:?}"
+    );
+    Ok(())
+}
+/// Under a fitted matrix base (a camera without colour data) Temp and Tint are
+/// relative to the white as shot; written to XMP and read back they give the same
+/// multipliers, with a DNG's CameraCalibration in them too.
+#[test]
+fn white_balance_round_trips_under_a_fitted_matrix_base() -> Result<()> {
+    use crate::camera_profiles::fitted;
+    let m = Metadata {
+        make: "Test".into(),
+        model: "NoMatrix".into(),
+        wb: [1.9, 1., 1.4],
+        daylight_wb: [1.; 3],
+        baseline_exposure: Some(0.),
+        dng_neutral_calibration: Some(crate::camera_data::NeutralCalibration {
+            gains: [0.9, 1., 1.1],
+            signature: String::new(),
+        }),
+        ..Default::default()
+    };
+    let d50 = [0.9642f32, 1., 0.8249];
+    let raw = [[0.6f32, 0.3, 0.1], [0.25, 0.7, 0.05], [0.0, 0.1, 0.9]];
+    let forward = std::array::from_fn(|i| {
+        let sum: f32 = raw[i].iter().sum();
+        std::array::from_fn(|j| raw[i][j] * d50[i] / sum)
+    });
+    let base = fitted::matrix_base(&m, forward)?;
+    let profile = fitted::with_look(&base, &fitted::FittedLook::identity())?;
+    let mut r = Recipe::with_profiles(&m, &[]);
+    r.profile = Some(std::sync::Arc::new(profile));
+    r.reset_white_balance(&m);
+    assert!(
+        r.wb.iter().all(|g| (g - 1.).abs() < 1e-3),
+        "as shot: {:?}",
+        r.wb
+    );
+    r.temperature = 5200.;
+    r.tint = 6.;
+    r.update_wb(&m);
+    let photo = crate::xmp::write::Photo {
+        raw_name: "IMG.DNG".into(),
+        settings: true,
+        format: "image/jpeg".into(),
+        ..Default::default()
+    };
+    let packet = crate::xmp::write::packet(&r, &m, &photo);
+    let back = parse(Path::new("photo.xmp"), &packet)?.apply(
+        &Recipe::with_profiles(&m, &[]),
+        &m,
+        &[],
+        None,
+    )?;
+    for (a, b) in back.wb.iter().zip(r.wb) {
+        assert!((a - b).abs() < 2e-3, "{:?} {:?}", back.wb, r.wb);
+    }
+    Ok(())
+}

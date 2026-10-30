@@ -333,7 +333,7 @@ impl Editor {
         ));
     }
     pub(super) fn effective_recipe(&self) -> Recipe {
-        let mut r = if self.view.compare.before_only() {
+        let mut r = if self.view.compare.renders_before_alone() {
             self.before_settings()
         } else {
             self.presets

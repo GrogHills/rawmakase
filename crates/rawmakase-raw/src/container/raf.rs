@@ -91,14 +91,11 @@ pub(crate) fn open(bytes: &[u8]) -> Result<RawInfo> {
     {
         super::tiff_exif::read(&t, &mut info);
         orientation = t.int(&t.ifds[0], 274).unwrap_or(1);
-        if let Some(dr) = t
-            .exif
-            .as_ref()
-            .and_then(|e| t.bytes_of(e, 0x927c))
-            .and_then(fuji::dynamic_range)
-        {
+        let notes = t.exif.as_ref().and_then(|e| t.bytes_of(e, 0x927c));
+        if let Some(dr) = notes.and_then(fuji::dynamic_range) {
             info.fuji_dynamic_range = dr;
         }
+        info.camera_look = notes.and_then(fuji::film_simulation);
     }
     info.flip = crate::geometry::flip(orientation);
     if let Some(shift) = fuji::exposure_shift(&records) {

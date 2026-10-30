@@ -75,7 +75,14 @@ that drops it.
 | Installation probe | `diagnostics.rs` | `updates::installation()`, which can run the package manager | None; the system probe stops waiting for it after 10 s and reports it unavailable | No |
 | GVFS bridge reaper (Linux) | `platform/network.rs` | The bridge process, which outlives the app | None | Never |
 
-One-shot jobs stay detached: Auto, Upright, Auto straighten, the Point Color and
+The Develop loader, Reference View, Library previews, preview builds, exports and
+Sync also fit the default Camera Look of a photo without colour data, once per file
+and build (seconds; a fit cache hit otherwise, and nothing for every other photo).
+The fit takes the job's cancel flag inside its renders and between its stages, so it
+stops as a decode does; a fit stopped that way is neither used nor cached.
+
+One-shot jobs stay detached: Auto, Upright, Auto straighten, Profile → Fit Camera
+Look, the Point Color and
 Targeted Adjustment samples, the onboarding scan, catalog open and import, file
 dialogs, bulk import, the preset scan, batch edits (Sync Settings, Auto Settings or a
 preset on the Library's selection; their Cancel is taken between photos and right

@@ -268,10 +268,16 @@ pub(crate) fn open(bytes: &[u8], t: TiffFile) -> Result<RawInfo> {
             info.cam_mul[3] = info.cam_mul[1];
         }
     }
-    info.file_matrix = d65_matrix(
+    let (matrices, illuminants) = (
         [matrix(50721), matrix(50722)],
         [t.int(ifd0, 50778), t.int(ifd0, 50779)],
     );
+    info.file_matrix_source = if tungsten_only(&matrices, illuminants) {
+        crate::info::MatrixSource::FileTungstenOnly
+    } else {
+        crate::info::MatrixSource::File
+    };
+    info.file_matrix = d65_matrix(matrices, illuminants);
     // Linear raw's samples carry AnalogBalance, gains its writer applied
     // (Adobe DNG Converter's for cameras that white balance small RAWs,
     // Apple's): XYZ to the samples is AnalogBalance × ColorMatrix, and
@@ -456,6 +462,18 @@ fn mix(values: &[Option<Vec<f64>>; 2], g: f64) -> Option<Vec<f64>> {
         [Some(a), Some(b)] => Some(a.iter().zip(b).map(|(a, b)| g * a + (1. - g) * b).collect()),
         [a, b] => a.clone().or_else(|| b.clone()),
     }
+}
+
+/// Whether the only colour matrix is of a tungsten calibration (Standard
+/// Light A, tungsten, ISO studio tungsten): the D65 matrix is then that one,
+/// its colour hardly a daylight photo's.
+fn tungsten_only(matrices: &[Option<Vec<f64>>; 2], illuminants: [Option<u32>; 2]) -> bool {
+    let only = match matrices {
+        [Some(_), None] => illuminants[0],
+        [None, Some(_)] => illuminants[1],
+        _ => return false,
+    };
+    matches!(only, Some(3 | 17 | 24))
 }
 
 /// The XYZ-to-camera matrix at D65 from ColorMatrix1 and 2 (rows of three)
@@ -1392,8 +1410,11 @@ pub(crate) mod tests {
         ];
         let cfa = crate::open(&dng(2, 2, &entries(false))).unwrap();
         assert_ne!(cfa.cam_xyz, file, "the camera has a table matrix");
+        assert_eq!(cfa.matrix_source, crate::MatrixSource::AdobeDng);
         let info = crate::open(&dng(2, 2, &entries(true))).unwrap();
         assert_eq!(info.cam_xyz, file);
+        // One matrix, of no stated illuminant: the file's, not a tungsten one.
+        assert_eq!(info.matrix_source, crate::MatrixSource::File);
         // The white through the file's matrix: neutral, as the image is.
         for m in &info.cam_mul[..3] {
             assert!((m - 1.).abs() < 1e-3, "{:?}", info.cam_mul);

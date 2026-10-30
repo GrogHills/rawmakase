@@ -359,6 +359,11 @@ pub(crate) fn dng_directory(raf: &[u8]) -> Option<&[u8]> {
 /// then the little-endian offset of a directory whose offsets are from the
 /// notes' start).
 pub(crate) fn dynamic_range(notes: &[u8]) -> Option<u32> {
+    note_short(notes, DEVELOPMENT_DYNAMIC_RANGE).map(u32::from)
+}
+
+/// The short `tag` of the maker notes.
+fn note_short(notes: &[u8], tag: u16) -> Option<u16> {
     if !notes.starts_with(b"FUJIFILM") {
         return None;
     }
@@ -367,17 +372,77 @@ pub(crate) fn dynamic_range(notes: &[u8]) -> Option<u32> {
     let count = b.u16(at).ok()?;
     (0..u64::from(count)).find_map(|i| {
         let e = at + 2 + 12 * i;
-        let tag = b.u16(e).ok()?;
+        let found = b.u16(e).ok()?;
         let kind = b.u16(e + 2).ok()?;
-        (tag == DEVELOPMENT_DYNAMIC_RANGE && kind == rawmakase_tiff::kind::SHORT)
-            .then(|| b.u16(e + 8).ok().map(u32::from))
+        (found == tag && kind == rawmakase_tiff::kind::SHORT)
+            .then(|| b.u16(e + 8).ok())
             .flatten()
     })
+}
+
+/// The film simulation of the maker notes: a black and white one is in Saturation
+/// (0x1003), a colour one in FilmMode (0x1401).
+pub(crate) fn film_simulation(notes: &[u8]) -> Option<String> {
+    let mono = note_short(notes, 0x1003).and_then(|v| {
+        Some(match v {
+            0x300 => "Monochrome",
+            0x301 => "Monochrome + R",
+            0x302 => "Monochrome + Ye",
+            0x303 => "Monochrome + G",
+            0x310 => "Sepia",
+            0x500 => "Acros",
+            0x501 => "Acros + R",
+            0x502 => "Acros + Ye",
+            0x503 => "Acros + G",
+            _ => return None,
+        })
+    });
+    let name = mono.or_else(|| {
+        Some(match note_short(notes, 0x1401)? {
+            0 => "Provia",
+            0x200 | 0x400 => "Velvia",
+            0x100 | 0x110 | 0x120 | 0x130 | 0x300 => "Astia",
+            0x500 => "Pro Neg. Std",
+            0x501 => "Pro Neg. Hi",
+            0x600 => "Classic Chrome",
+            0x700 => "Eterna",
+            0x800 => "Classic Neg.",
+            0x900 => "Eterna Bleach Bypass",
+            0xa00 => "Nostalgic Neg.",
+            0xb00 => "Reala Ace",
+            _ => return None,
+        })
+    });
+    name.map(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn notes(records: &[(u16, u16)]) -> Vec<u8> {
+        let mut n = b"FUJIFILM".to_vec();
+        n.extend(12u32.to_le_bytes());
+        n.extend((records.len() as u16).to_le_bytes());
+        for (tag, value) in records {
+            n.extend(tag.to_le_bytes());
+            n.extend(rawmakase_tiff::kind::SHORT.to_le_bytes());
+            n.extend(1u32.to_le_bytes());
+            n.extend(value.to_le_bytes());
+            n.extend([0, 0]);
+        }
+        n
+    }
+
+    #[test]
+    fn a_film_simulation_is_named_black_and_white_first() {
+        let classic = notes(&[(0x1003, 0), (0x1401, 0x600)]);
+        assert_eq!(film_simulation(&classic).as_deref(), Some("Classic Chrome"));
+        let acros = notes(&[(0x1003, 0x500), (0x1401, 0)]);
+        assert_eq!(film_simulation(&acros).as_deref(), Some("Acros"));
+        assert_eq!(film_simulation(&notes(&[(0x1401, 0x7777)])), None);
+        assert_eq!(film_simulation(b"other"), None);
+    }
 
     /// A header directory of `records`.
     pub(crate) fn directory(records: &[(u16, &[u8])]) -> Vec<u8> {

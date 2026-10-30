@@ -274,6 +274,12 @@ impl Editor {
             ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         ui.painter()
             .rect_filled(whole, 0., theme::palette(ui.ctx()).photo_backdrop());
+        if self.module == Module::Develop
+            && self.view.compare == before_after::Compare::CameraThumbnail
+        {
+            self.camera_thumbnail_ui(ui, whole);
+            return response;
+        }
         // The edit's side of the viewport; all of it unless Before shows beside it.
         let panes = before_after::panes(self.view.compare, whole);
         let area = panes.after.area;
@@ -394,7 +400,7 @@ impl Editor {
         if let (Some(region), Some(at)) = (&region_texture, region_rect) {
             painter.image(region.id(), at, uv, Color32::WHITE);
         }
-        if self.view.compare.before_only() {
+        if self.view.compare.renders_before_alone() {
             before_after::badge(ui, area, "Before");
         }
         self.develop_info_overlay(ui, panes.after.clip);

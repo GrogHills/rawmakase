@@ -367,6 +367,34 @@ pub(crate) fn stage_samples(
     let samples = detail(toned, r, samples, weights.as_deref(), None, cancel)?;
     develop_samples_to(im, r, &samples, cancel, weights.as_deref(), output)
 }
+/// The camera's own samples of `region`, before highlight reconstruction, noise
+/// reduction and retouching, through the same geometry, lens correction and
+/// default crop as the render, times the recipe's white balance (`Recipe::wb`):
+/// white-balanced camera RGB before any profile, matrix or exposure. A pixel
+/// outside the photo is NaN.
+pub(crate) fn camera_samples(
+    im: &CameraImage,
+    r: &Recipe,
+    g: &Geometry,
+    region: [u32; 4],
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Rendered> {
+    let samples = sample_region(Source::new(im), r, g, region, 0., cancel)?;
+    let pixels = samples
+        .pixels
+        .iter()
+        .zip(&samples.positions)
+        .map(|(p, pos)| match pos[0].is_nan() {
+            true => [f32::NAN; 3],
+            false => std::array::from_fn(|c| p[c] * r.wb[c]),
+        })
+        .collect();
+    Ok(Rendered {
+        width: samples.width,
+        height: samples.height,
+        pixels,
+    })
+}
 fn develop_samples_to(
     im: Source,
     r: &Recipe,

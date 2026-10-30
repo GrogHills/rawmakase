@@ -768,6 +768,61 @@ fn larger_xmp_moves_camera_raw_settings_to_extended_segments() -> Result<()> {
     Ok(())
 }
 
+/// A fitted camera look's profile, too large for one segment even alone, moves to
+/// the extended segments and reads back whole from them.
+#[test]
+fn a_fitted_look_travels_in_extended_xmp() -> Result<()> {
+    use crate::camera_profiles::fitted;
+    let m = crate::camera_data::Metadata {
+        make: "Test".into(),
+        model: "Camera".into(),
+        cam_xyz: [[0.8, -0.2, -0.1], [-0.3, 1.1, 0.2], [-0.05, 0.15, 0.6]],
+        wb: [1.; 3],
+        daylight_wb: [1.; 3],
+        ..Default::default()
+    };
+    // Full-precision noise in every node, which zlib can't shrink.
+    let mut seed = 99u32;
+    let mut next = || {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        (seed >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let mut look = fitted::FittedLook::identity();
+    for node in look.table.iter_mut() {
+        *node = [40. * next() - 20., 0.8 + 0.4 * next(), 0.8 + 0.4 * next()];
+    }
+    let profile = fitted::with_look(&fitted::standard_base(&m).unwrap(), &look)?;
+    let mut r = Recipe::with_profiles(&m, &[]);
+    r.profile = Some(std::sync::Arc::new(profile.clone()));
+    let photo = crate::xmp::write::Photo {
+        settings: true,
+        format: "image/jpeg".into(),
+        ..Default::default()
+    };
+    let packet = crate::xmp::write::packet(&r, &m, &photo);
+    assert!(packet.len() > 65_504);
+    let segments = xmp_segments(&jpeg_with(&packet)?);
+    let mut whole = Vec::new();
+    for (h, body) in &segments {
+        if h.starts_with(b"http://ns.adobe.com/xmp/extension") {
+            let total = u32::from_be_bytes(body[32..36].try_into()?) as usize;
+            let offset = u32::from_be_bytes(body[36..40].try_into()?) as usize;
+            whole.resize(total, 0);
+            whole[offset..offset + body.len() - 40].copy_from_slice(&body[40..]);
+        }
+    }
+    let extended = String::from_utf8(whole)?;
+    assert!(extended.contains("rawmakase:FittedProfile"));
+    let back = crate::xmp::parse(std::path::Path::new("x.xmp"), &extended)?.apply(
+        &Recipe::with_profiles(&m, &[]),
+        &m,
+        &[],
+        None,
+    )?;
+    assert_eq!(back.profile.as_deref(), Some(&profile));
+    Ok(())
+}
+
 /// exiftool, an independent reader, reads the split packet back whole. CI
 /// installs it and sets RAWMAKASE_REQUIRE_EXIFTOOL; elsewhere the test is
 /// skipped without it.

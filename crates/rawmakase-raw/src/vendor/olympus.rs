@@ -91,6 +91,9 @@ pub(crate) struct Notes {
     /// The red, green and blue levels of the camera's own D65 white
     /// balance, which the colour matrix is of.
     pub daylight: Option<[f32; 3]>,
+    /// CameraSettings' ColorSpace (0x0507): 0 sRGB, 1 Adobe RGB (2, ProPhoto, is
+    /// not a JPEG's).
+    pub color_space: Option<crate::info::PreviewSpace>,
 }
 
 /// The maker note's directories: the main one and ImageProcessing, and the
@@ -265,5 +268,10 @@ pub(crate) fn read(t: &TiffFile) -> Option<Notes> {
     {
         out.previews.push((base + u64::from(at), u64::from(len)));
     }
+    out.color_space = match n.settings.as_ref().and_then(|s| v.int(s, 0x0507)) {
+        Some(0) => Some(crate::info::PreviewSpace::Srgb),
+        Some(1) => Some(crate::info::PreviewSpace::AdobeRgb),
+        _ => None,
+    };
     Some(out)
 }

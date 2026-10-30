@@ -639,11 +639,16 @@ impl Editor {
         if summary.imported > 0 {
             match summary.kind {
                 ImportKind::CameraProfiles | ImportKind::Luts(_) => {
+                    self.profile_library = crate::camera_profiles::library_fingerprint();
                     let before = self.document.edit.recipe().clone();
                     let mut current = None;
                     if let Some(m) = &self.document.metadata {
                         let listed = crate::camera_profiles::listed(m);
-                        self.document.profiles = listed.profiles;
+                        self.document.profiles = super::camera_look::keep_fitted_default(
+                            &self.document.profiles,
+                            m,
+                            listed.profiles,
+                        );
                         self.document.profile_errors = listed.errors;
                         self.document.profile_groups = listed.groups;
                         // Importing never changes an edit: the user picks a

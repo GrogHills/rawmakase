@@ -59,6 +59,7 @@ const THUMBNAIL_EDGE: u32 = 640;
 pub(super) fn identity(
     record: &EditRecord,
     defaults: &DevelopDefaults,
+    library: &str,
     demosaic: Demosaic,
 ) -> String {
     let mut h = DefaultHasher::new();
@@ -68,6 +69,9 @@ pub(super) fn identity(
     record.lightroom().hash(&mut h);
     if record.recipe.is_none() && record.lightroom().is_none() {
         format!("{defaults:?}").hash(&mut h);
+        // Which profile a default picks, and a photo without colour data's fitted
+        // look, depend on the profile library.
+        library.hash(&mut h);
         rawmakase_export::build_info::SOFTWARE.hash(&mut h);
     }
     format!("{:?}", demosaic).hash(&mut h);
@@ -197,6 +201,8 @@ pub(super) fn render(item: &Item, cancel: &AtomicBool) -> anyhow::Result<image::
     let opened = crate::photo::open_source(&item.path, cancel)
         .with_context(|| format!("{} can't be read", item.path.display()))?;
     let (profiles, _) = crate::camera_profiles::installed(opened.metadata());
+    let profiles =
+        crate::camera_look::with_default(&item.path, opened.metadata(), profiles, cancel);
     let mut recipe = item_recipe(item, opened.metadata(), &profiles)?;
     let image = match opened {
         Opened::Raw(raw) if needs_full(&recipe, &raw.metadata, item.edge) => {
@@ -818,7 +824,12 @@ impl Editor {
                 catalog: catalog.clone(),
                 photo,
                 name,
-                identity: identity(&record.edit, &self.raw_defaults, self.demosaic),
+                identity: identity(
+                    &record.edit,
+                    &self.raw_defaults,
+                    &self.profile_library,
+                    self.demosaic,
+                ),
                 ticket: edited.then(|| library.edited_ticket(photo)).flatten(),
                 record: record.edit,
                 path,
@@ -1016,7 +1027,13 @@ impl Editor {
         let Ok(record) = library.session.catalog.edit_record(item.photo) else {
             return;
         };
-        if identity(&record, &self.raw_defaults, self.demosaic) == item.identity {
+        if identity(
+            &record,
+            &self.raw_defaults,
+            &self.profile_library,
+            self.demosaic,
+        ) == item.identity
+        {
             library.show_built_preview(&self.context, item.photo, thumbnail);
         }
     }

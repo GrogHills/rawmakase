@@ -27,6 +27,8 @@ pub(super) enum Compare {
     Off,
     /// Before alone, full frame.
     BeforeOnly,
+    /// The camera's embedded JPEG in place of the photo (see `camera_thumbnail`).
+    CameraThumbnail,
     /// Before and After side by side, each the whole photo.
     SideBySide(Axis),
     /// One photo, Before on one side of a line and After on the other.
@@ -64,6 +66,11 @@ impl Compare {
     }
     /// Before alone: the panels are disabled, as nothing they change is shown.
     pub(super) fn before_only(self) -> bool {
+        matches!(self, Self::BeforeOnly | Self::CameraThumbnail)
+    }
+    /// The photo is rendered with Before's settings, alone. Not the camera thumbnail,
+    /// which shows no render: under it, and outside Develop, the photo is the edit.
+    pub(super) fn renders_before_alone(self) -> bool {
         self == Self::BeforeOnly
     }
     /// Before, or the reference photo, beside the edit, rendered separately.
@@ -114,7 +121,7 @@ pub(super) fn panes(compare: Compare, area: Rect) -> Panes {
     };
     let whole = Pane { area, clip: area };
     match compare {
-        Compare::Off | Compare::BeforeOnly => Panes {
+        Compare::Off | Compare::BeforeOnly | Compare::CameraThumbnail => Panes {
             after: whole,
             before: None,
         },
@@ -264,6 +271,9 @@ impl Editor {
         self.view.compare = view;
         if view.reference() {
             self.load_reference();
+        }
+        if view == Compare::CameraThumbnail {
+            self.start_camera_thumbnail();
         }
     }
     /// A tool opened while Before is beside the edit goes back to the edit alone.

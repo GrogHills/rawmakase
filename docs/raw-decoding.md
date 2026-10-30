@@ -901,6 +901,15 @@ Known: a DNG without a D65 matrix is read with its ColorMatrix1, which for
 GoPro's GPRs (illuminants Standard A and D50) and Leica's Q and SL DNGs is
 the tungsten one, not the D50 one Camera Raw would use at D65.
 
+Where the matrix came from is kept as a fact of the file, never saved
+(`RawInfo::matrix_source`, `Metadata::matrix_source`): a table row
+(`adobe-dng` or `compat-observed`), the DNG's own ColorMatrix (or one of a
+tungsten calibration alone), the Olympus maker note, a monochrome DNG's
+neutral, or none. `photo::open` adds whether a DNG's embedded profile is
+absent, unreadable, colour matrices alone, for another camera or usable
+(`Metadata::embedded_profile_status`), before it drops the parse error.
+Camera Look (fitted) decides from them which photos have no colour data.
+
 ## Checking decodes
 
 The decoders were built against LibRaw's recorded output on the test dataset,

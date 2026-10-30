@@ -99,13 +99,17 @@ pub(in crate::app) enum EditSource {
     Defaults(Arc<crate::raw_defaults::DevelopDefaults>),
 }
 impl EditSource {
-    /// The recipe a photo is rendered with: its edit, or the defaults
-    /// Develop would open it with (Adobe Default unless given).
+    /// The recipe the photo at `path` is rendered with: its edit, or the defaults
+    /// Develop would open it with (Adobe Default unless given), a fitted camera look
+    /// included for a photo without colour data.
     pub(crate) fn recipe(
         edit: Option<&Self>,
         m: &crate::camera_data::Metadata,
+        path: &Path,
+        cancel: &AtomicBool,
     ) -> anyhow::Result<Recipe> {
         let (profiles, _) = crate::camera_profiles::installed(m);
+        let profiles = crate::camera_look::with_default(path, m, profiles, cancel);
         Ok(match edit {
             Some(Self::Recipe(json)) => serde_json::from_str(json)?,
             Some(Self::Lightroom(text)) => {
@@ -284,7 +288,7 @@ pub(super) fn develop_quickly(
     cancel: &AtomicBool,
 ) -> anyhow::Result<image::RgbImage> {
     let opened = crate::photo::open_source(path, cancel)?;
-    let recipe = EditSource::recipe(edit, opened.metadata())?;
+    let recipe = EditSource::recipe(edit, opened.metadata(), path, cancel)?;
     let image = match opened {
         crate::photo::Opened::Raw(raw) => raw.develop(crate::camera_data::Decode::Half, cancel)?,
         crate::photo::Opened::Rendered(image) => image,

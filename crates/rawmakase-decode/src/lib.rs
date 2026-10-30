@@ -10,6 +10,7 @@
 use rawmakase_engine::develop;
 use rawmakase_model::{camera_data, camera_profiles, dng, lens, storage};
 
+pub mod camera_look;
 pub mod color_management;
 pub mod decode;
 pub mod decode_cache;

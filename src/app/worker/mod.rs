@@ -193,6 +193,20 @@ pub(crate) enum Event {
         analysed: Box<Recipe>,
         result: Result<Vec<[f32; 9]>, String>,
     },
+    /// Camera Look (fitted) for the photo loaded as `id`, fitted while its profile
+    /// was `profile`, or why none was.
+    CameraLook {
+        id: u64,
+        generation: u64,
+        profile: Option<Arc<crate::camera_profiles::CameraProfile>>,
+        result: Result<Box<crate::camera_profiles::CameraProfile>, String>,
+    },
+    /// The embedded JPEG of the photo loaded as `id`, or why there is none.
+    CameraThumbnail {
+        id: u64,
+        generation: u64,
+        result: Result<crate::camera_look::CameraPreview, String>,
+    },
     /// The Crop panel's Auto straighten angle for the photo loaded as `id`, analysed
     /// from `analysed`; None when the photo has nothing to level by.
     Straighten {

@@ -869,6 +869,11 @@ impl super::Editor {
             "Working out Auto settings…",
         );
         add(
+            document.camera_look.is_running(),
+            "camera look",
+            "Fitting the camera's look to its JPEG preview…",
+        );
+        add(
             document.upright.is_running(),
             "upright",
             "Analysing for Upright…",

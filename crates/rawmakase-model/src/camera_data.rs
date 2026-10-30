@@ -29,6 +29,45 @@ impl Source {
     }
 }
 
+/// Where a RAW's colour matrix (`Metadata::cam_xyz`) comes from. A fact of the
+/// file and the build's camera table, read again on open and never saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MatrixSource {
+    /// None: no camera table row, and no matrix in the file or its maker notes.
+    #[default]
+    Absent,
+    /// The camera table's matrix from Adobe DNG Converter's output.
+    AdobeDng,
+    /// The camera table's matrix from RAWmakase's earlier decoder, for a camera
+    /// Adobe has none for.
+    CompatObserved,
+    /// The DNG's own ColorMatrix tags.
+    File,
+    /// The DNG's own ColorMatrix, of a tungsten calibration alone.
+    FileTungstenOnly,
+    /// The camera's maker notes (Olympus), with its D65 levels.
+    MakerNote,
+    /// A monochrome DNG's neutral colour, by definition.
+    Neutral,
+}
+
+/// What a DNG's embedded camera profile is to its photo: whether it has one, and
+/// whether RAWmakase can use it. Read again on open, never saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum EmbeddedProfileStatus {
+    /// No embedded profile (every RAW but a DNG, and DNGs without one).
+    #[default]
+    None,
+    /// Profile tags that do not parse as a camera profile, nor as colour matrices.
+    Unreadable,
+    /// Colour matrices without a forward matrix: matrix data, not a profile.
+    MatrixOnly,
+    /// A profile made for another camera than the photo's.
+    OtherCamera,
+    /// A profile for this camera (`Metadata::embedded_dcp`).
+    Usable,
+}
+
 /// A white-balance preset a camera stores for itself, as R, G, B multipliers.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -144,6 +183,17 @@ pub struct Metadata {
     /// LibRaw's XYZ(D65)-to-camera matrix, equivalent to a DNG ColorMatrix. Zero when unknown.
     #[serde(default)]
     pub cam_xyz: [[f32; 3]; 3],
+    /// Where `cam_xyz` comes from; read again on open, not saved.
+    #[serde(skip)]
+    pub matrix_source: MatrixSource,
+    /// The look the camera's JPEGs were made with, by the maker's name for it; read
+    /// again on open, not saved.
+    #[serde(skip)]
+    pub camera_look: Option<String>,
+    /// What the DNG's embedded camera profile is to this photo; read again on open,
+    /// not saved.
+    #[serde(skip)]
+    pub embedded_profile_status: EmbeddedProfileStatus,
     /// Built-in lens correction stored by the camera, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lens: Option<crate::optics::LensCorrection>,

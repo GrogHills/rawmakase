@@ -899,6 +899,7 @@ impl Editor {
         // stay in Develop.
         if self.view.tool != Tool::None
             || self.view.compare.shows_before()
+            || self.view.compare == super::before_after::Compare::CameraThumbnail
             || self.view.clipping != Default::default()
             || self.presets.preview.is_some()
         {
@@ -1564,7 +1565,11 @@ impl Editor {
                 if i.key_pressed(egui::Key::J) && !i.modifiers.any() {
                     self.view.clipping.toggle_both();
                 }
-                if i.key_pressed(egui::Key::Backslash) {
+                // Shift+\\ arrives as | on most layouts.
+                let backslash = i.key_pressed(egui::Key::Backslash);
+                if i.key_pressed(egui::Key::Pipe) || (backslash && i.modifiers.shift) {
+                    self.toggle_camera_thumbnail();
+                } else if backslash {
                     let view = self
                         .view
                         .compare

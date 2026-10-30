@@ -198,6 +198,12 @@ pub(super) fn settings(r: &Recipe, shown: &Metadata, photo: Option<Frame<'_>>) -
             None => &profile.name,
         };
         s.text("CameraProfile", name.clone());
+        if crate::camera_profiles::fitted::is_fitted(profile) {
+            s.text(
+                super::FITTED_PROFILE_KEY,
+                crate::camera_profiles::fitted::carried(profile),
+            );
+        }
     }
     // A rendered file's white balance is Lightroom's relative Temp and Tint; only
     // its recipes carry the Embedded profile, so this holds without the photo.

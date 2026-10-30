@@ -119,6 +119,13 @@ pub fn targeted_sample(
 /// A stage between the per-pixel pipeline's stages (docs/scene-tone-stage.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
+    /// White-balanced camera RGB as the decoder made it, before highlight
+    /// reconstruction, noise reduction and retouching, and before the profile, its
+    /// matrix and the camera's baseline exposure: the sample times `Recipe::wb`.
+    /// Divided by that and the photo's as-shot multipliers (`Metadata::wb`) it is
+    /// the channel's fraction of the sensor's white. Pixels outside the photo are
+    /// NaN.
+    CameraInput,
     /// Linear ProPhoto RGB entering the scene tone stage.
     SceneInput,
     /// Linear ProPhoto RGB leaving it, before the profile's look and tone curve: where
@@ -136,6 +143,17 @@ pub fn render_stage(
     stage: Stage,
     cancel: &AtomicBool,
 ) -> Result<crate::rendered::Rendered> {
+    render_stage_sized(im, r, stage, 0, cancel)
+}
+/// [`render_stage`] at most `max_edge` pixels on the long edge (0 for full size),
+/// sampled from the full-size photo as a preview is.
+pub fn render_stage_sized(
+    im: &CameraImage,
+    r: &Recipe,
+    stage: Stage,
+    max_edge: u32,
+    cancel: &AtomicBool,
+) -> Result<crate::rendered::Rendered> {
     use develop::pipeline::PixelOutput;
     let shown = r.as_rendered();
     shown.validate()?;
@@ -144,13 +162,18 @@ pub fn render_stage(
     if r.lens_ca {
         crate::lens::auto_ca::prime(im);
     }
+    if stage == Stage::CameraInput {
+        let g = Geometry::new(im, r, max_edge);
+        return develop::pipeline::camera_samples(im, r, &g, [0, 0, g.width, g.height], cancel);
+    }
     let source = retouched(im, r, cancel, None)?;
-    let g = Geometry::new(&source.image, r, 0);
+    let g = Geometry::new(&source.image, r, max_edge);
     let (toned, tonal) = local_stage(&source.image, &source, r, 1., cancel, None)?;
     let output = match stage {
         Stage::SceneInput => PixelOutput::SceneInput,
         Stage::SceneOutput => PixelOutput::SceneOutput,
         Stage::AutoBasis => PixelOutput::AutoBasis,
+        Stage::CameraInput => unreachable!("sampled above"),
     };
     develop::pipeline::stage_samples(
         &toned,

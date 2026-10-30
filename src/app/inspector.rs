@@ -480,6 +480,8 @@ impl Editor {
         let mut upright_request = false;
         let mut guided_action = None;
         let mut treatment_request = None;
+        let mut fit_camera_look = false;
+        let can_fit_camera_look = self.can_fit_camera_look();
         let mut auto_mix_request = false;
         let mut profile_changed_from = None;
         // A conversion to black & white waiting for the photo to decode.
@@ -596,6 +598,15 @@ impl Editor {
                             .clicked()
                         {
                             import_luts = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .add_enabled(can_fit_camera_look, egui::Button::new("Fit Camera Look"))
+                            .on_hover_text("Fits a look to this photo's own JPEG preview, the camera's rendering of it, and uses it as the profile: Camera Look (fitted). It is saved with the edit; fitting again makes a new one.")
+                            .clicked()
+                        {
+                            fit_camera_look = true;
                             ui.close();
                         }
                     });
@@ -738,9 +749,20 @@ impl Editor {
                             } else {
                                 &NamedWhiteBalance::ALL[..]
                             };
+                            // A fitted matrix base reads As Shot as D65 whatever the
+                            // light: its temperatures are relative, so named whites
+                            // would be wrong (imported XMP keeps them as written).
+                            let uncalibrated = r
+                                .profile
+                                .as_ref()
+                                .is_some_and(|p| crate::camera_profiles::fitted::is_uncalibrated_base(p));
                             for &named in named {
                                 if ui
-                                    .selectable_label(selected == named.name(), named.name())
+                                    .add_enabled(
+                                        !uncalibrated,
+                                        egui::Button::selectable(selected == named.name(), named.name()),
+                                    )
+                                    .on_disabled_hover_text("This photo has no colour data of its own: its Camera Look (fitted) knows the white as shot, not the light's temperature. As Shot, Auto, the selector and Temp and Tint still work.")
                                     .clicked()
                                     && let Some(m) = &metadata
                                 {
@@ -1547,6 +1569,9 @@ impl Editor {
         if let Some(treatment) = treatment_request {
             self.set_treatment(treatment);
         }
+        if fit_camera_look {
+            self.start_camera_look();
+        }
         if auto_mix_request {
             self.auto_black_white_mix();
         }
@@ -1612,6 +1637,7 @@ impl Editor {
             match result {
                 Ok(done) => {
                     if !done.imported.is_empty() {
+                        self.profile_library = crate::camera_profiles::library_fingerprint();
                         let crate::camera_profiles::Listed {
                             profiles,
                             errors,
@@ -1620,6 +1646,11 @@ impl Editor {
                         // As the loader's: the raw defaults are resolved again
                         // after this frame, so changing an unedited photo's recipe
                         // is not taken for an edit.
+                        let profiles = super::camera_look::keep_fitted_default(
+                            &self.document.profiles,
+                            &m,
+                            profiles,
+                        );
                         let _ = self.tx.send(super::worker::Event::Profiles {
                             id: self.load.id(),
                             profiles,
