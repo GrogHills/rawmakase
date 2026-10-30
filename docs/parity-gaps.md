@@ -146,6 +146,82 @@ to 0.7 EV short of Camera Raw's, which the oracle cannot close either) and the
 demosaic's own noise. Not changed: X-Trans, whose demosaic still clips each sample
 first; the D7000 interior and the OM-5, which are not noise cases.
 
+### Highlight reconstruction colour (2026-10-29)
+
+Clipped skies at Highlights −100 rendered duller and pinker than Camera Raw's,
+with a hard edge where the second channel clipped (an RX100 VII sunrise: median
+ΔE00 2.79, chroma-only 1.33). Highlight recovery rebuilt a clipped channel from the
+ratios of unclipped neighbours, or from a colour map of the same bright area, so a
+warm patch with green clipped stayed warm. Flat coloured patches rendered through a
+linear profile with an As Shot neutral, so that the channels clip at different scene
+levels, give Camera Raw's rule: in white-balanced camera space every channel is pulled
+up towards the mean of the other two, never down, by a weight
+((s − 0.25) / 0.75)^1.8 of its own sensor fraction s, solved as a fixed point anchored
+at the recorded values. A clipped channel becomes the mean of the other two, past two
+clips the pixel is neutral, and unclipped colours near the white are desaturated the
+same way; over 136 patches the fit is within 0.005 RMS of the level per channel. The
+rule reads no neighbours, as the flat patches show, and replaces the neighbourhood
+estimate and the colour map ([rendering quality](rendering-quality.md)).
+
+The sunrise goes 2.79 → 2.55 (chroma 1.33 → 1.05). Dataset gate against the engine
+with the noise-clipping change above (median ΔE00 of the validation sets; Default
+and Highlights from the highlights sets, Shadows from the shadows sets):
+
+| Set | Default | Highlights −100 | Highlights −50 | Shadows +100 | Shadows −50 |
+| --- | --- | --- | --- | --- | --- |
+| pixls | 0.46 → 0.46 | 1.06 → 1.28 | 0.81 → 0.89 | 1.41 → 1.40 | 0.99 → 0.93 |
+| own | 0.58 → 0.58 | 1.11 → 1.11 | 0.86 → 0.86 | 1.56 → 1.61 | 0.74 → 0.74 |
+| signature edits | 0.30 → 0.30 | 0.87 → 0.88 | 0.62 → 0.60 | 2.05 → 2.11 | 0.60 → 0.51 |
+| pixls stress | 0.90 → 0.79 | 1.26 → 1.18 | 1.14 → 1.02 | 2.20 → 2.14 | 1.16 → 1.16 |
+| own stress | 0.53 → 0.53 | 1.05 → 0.87 | 0.84 → 0.72 | 1.77 → 1.77 | 0.39 → 0.39 |
+| signature edits stress | 0.34 → 0.33 | 0.66 → 0.56 | 0.49 → 0.45 | 1.19 → 1.14 | 0.57 → 0.43 |
+
+Across all 18 sets 21 photo/setting rows improve by more than 0.3 and 12 worsen, the
+mixed sets' Dehaze + Clarity and colour Shadows cases most (up to 5.25 → 3.38). The
+rows that worsen are luminance, not colour, and come from the Shadows/Highlights
+rule rather than from the reconstruction: fully clipped pixels now reconstruct to the
+highest white-balance gain instead of the colour map's ceiling, so the histogram top
+the rule reads rises by 0.44 stops on clipped photos (a DC-S1 field 0.36 → 0.80, a
+Rebel T7i 0.06 → 0.50 stops above white) and the rule, fitted to maps from the old
+decode, lifts the field 4 L* too far at Shadows +100 (3.59 → 5.48) and darkens the
+T7i 2 L* too far at Highlights −100 (1.06 → 1.61), while both default renders
+improve. Next: refit the rule on measurement maps from this decode. Still open: the
+X-T30 II plateau that is darker than Camera Raw's already at default (white level or
+X-Trans clipping), and the demosaic's red/blue noise above Camera Raw's.
+
+### Moving the rule's histogram top: what did not work (2026-10-30)
+
+The two luminance regressions above (a DC-S1 field at Shadows +100, a Rebel T7i at
+Highlights −100) come from the Shadows/Highlights rule reading the reconstructed
+overshoot: a clipped spot of 0.05% of the frame raises the top the rule reads by 0.44
+stops. A probe settles what Camera Raw does with such a top (mosaics under an As Shot
+neutral, with a square of 0.05, 0.5, 3 or 12% of the frame either clipped in every
+channel, so that it reconstructs a stop above the white, or just below the white):
+the clipped square adds only 0.05 to 0.09 EV to Camera Raw's Shadows +100 lift of the
+dark patches beside it, against the unclipped square of the same size, so Camera Raw
+counts clipped pixels close to the white. Every way of giving the rule that behaviour
+failed on the photos, each retrained from the engine's own maps with four seeds:
+
+| Variant | Small-clip photos | Heavy-overshoot photos | Decision |
+| --- | --- | --- | --- |
+| Map clamped at the white, retrained | DC-S1 5.48 → 1.39, T7i 1.61 → 0.63, signature Shadows +100 2.11 → 1.38 | RX100 VII at 6400 K + Shadows +100 2.67 → 9.54; a beach with a quarter of the frame above the white 1.37 → 7.75 at Highlights −100 (the curve pulls the mid-tones, the whole frame 8 L* dark) | Rejected: 34 rows better, 33 worse, two catastrophic |
+| Overshoot compressed to a quarter or a half instead of clamped | Same wins | RX100 5.37 / 3.74, beach 8.44 / 6.97 | Rejected |
+| Clamp plus 34 training mosaics with 10 to 35% of the frame clipped under white-balance gains | Smaller wins | RX100 6.87, beach 4.57 | Rejected: the shape is not learnt from mosaics |
+| Shipped weights, top at the 99.9th or 99.95th percentile instead of the maximum | T7i 2.70 → 2.28, DC-S1 unchanged (its spot is 0.16%) | beach 1.50 → 2.21, a FZ1000 1.64 → 3.01 | Rejected |
+| Eight seeds instead of four | Identical to four | Identical | The losses are not seed variance |
+
+A retrain of the shipped configuration on the new decode's maps without any clamp
+reproduces the shipped rule on these photos (RX100 2.54, beach 1.55) and leaves the
+DC-S1 and T7i as they are. The rule as fitted therefore depends on the overshoot in a
+way that the flat-patch probe does not show, and the photos with a large reconstructed
+area are matched by that dependence; the small-spot photos are not. What is left to
+try is a feature that tells the rule how much of the frame is clipped, so that it can
+learn both regimes, and training photos chosen for small clipped spots.
+
+A second gap surfaced by the same probe: with a bright area of 12% of the frame, clipped
+or not, Camera Raw lifts the mid-tones at Shadows +100 by 0.4 EV and the rule by 0.7 to
+1.2 EV. The sky and ground mosaics do not cover it.
+
 ### Shadows/Highlights research: what did not work (2026-10-16)
 
 **No candidate from this investigation passed the requirements for shipping.**

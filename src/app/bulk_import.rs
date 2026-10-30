@@ -634,16 +634,13 @@ impl Editor {
             },
         );
     }
-    pub(super) fn import_progress(&mut self) {
-        if let Some(progress) = &self.importing {
-            self.status = progress.text();
-        }
-    }
     pub(super) fn imported(&mut self, summary: Summary, ctx: &egui::Context) {
         self.importing = None;
         if summary.imported > 0 {
             match summary.kind {
                 ImportKind::CameraProfiles | ImportKind::Luts(_) => {
+                    let before = self.document.edit.recipe().clone();
+                    let mut current = None;
                     if let Some(m) = &self.document.metadata {
                         let listed = crate::camera_profiles::listed(m);
                         self.document.profiles = listed.profiles;
@@ -654,8 +651,17 @@ impl Editor {
                         // which may now resolve to an imported profile.
                         self.refresh_photo_defaults();
                         self.refresh_preset_support();
+                        if self.document.edit.recipe() == &before {
+                            current = self.document.catalog_photo.filter(|id| {
+                                self.library.as_ref().is_some_and(|library| {
+                                    library.photo(*id).is_some_and(|photo| {
+                                        Some(&photo.path) == self.document.path.as_ref()
+                                    })
+                                })
+                            });
+                        }
                     }
-                    self.refresh_library_defaults();
+                    self.refresh_library_defaults_preserving(current);
                 }
                 ImportKind::LensProfiles => {
                     // Lens profiles are matched when a photo opens: reopen it.
@@ -669,10 +675,17 @@ impl Editor {
                 ImportKind::Presets => self.reload_presets(ctx),
             }
         }
-        self.status = summary.message();
+        let mut said = summary.message();
         if summary.has_details() {
-            self.status.push_str(": ");
-            self.status.push_str(&summary.details(1));
+            said.push_str(": ");
+            said.push_str(&summary.details(1));
+        }
+        if summary.failures() > 0 && summary.done() == 0 {
+            self.messages.fail(said);
+        } else if summary.failures() > 0 || summary.done() == 0 {
+            self.messages.warn(said);
+        } else {
+            self.messages.done(said);
         }
         self.onboarding.imported(summary);
     }

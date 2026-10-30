@@ -45,7 +45,7 @@ impl Editor {
         let mut changed = before_changed && self.view.compare.shows_before();
         if self.follows_defaults() {
             if let Some(note) = &resolved.note {
-                self.status = note.clone();
+                self.messages.note(note.clone());
             }
             if *self.document.edit.recipe() != resolved.recipe {
                 self.document.edit.replace(resolved.recipe.clone());
@@ -99,8 +99,15 @@ impl Editor {
     /// Renders the Library's previews of photos without an edit again, e.g. as
     /// imported camera profiles change what the defaults resolve to.
     pub(super) fn refresh_library_defaults(&mut self) {
+        self.refresh_library_defaults_preserving(None);
+    }
+
+    pub(super) fn refresh_library_defaults_preserving(
+        &mut self,
+        current: Option<crate::catalog::PhotoId>,
+    ) {
         if let Some(library) = &mut self.library {
-            library.set_defaults(self.raw_defaults.clone());
+            library.set_defaults_preserving(self.raw_defaults.clone(), current);
         }
         // An unedited reference photo follows them too, profiles imported included.
         self.reload_reference();
@@ -237,13 +244,13 @@ impl Editor {
         });
         if settings != *self.raw_defaults.settings() {
             // Replaces any earlier choice's note.
-            self.status = match self.set_raw_defaults(settings) {
-                Err(e) => format!("Raw defaults not saved: {e:#}"),
-                Ok(()) => self
-                    .photo_defaults()
-                    .and_then(|d| d.note)
-                    .unwrap_or_else(|| "Raw defaults saved".into()),
-            };
+            match self.set_raw_defaults(settings) {
+                Err(e) => self.messages.fail(format!("Raw defaults not saved: {e:#}")),
+                Ok(()) => match self.photo_defaults().and_then(|d| d.note) {
+                    Some(note) => self.messages.warn(note),
+                    None => self.messages.done("Raw defaults saved"),
+                },
+            }
         }
     }
 }
@@ -619,11 +626,11 @@ mod tests {
             })
             .unwrap();
         editor.events(&ctx);
-        assert!(editor.status.starts_with("Developed in 0.20s · "));
+        assert!(editor.messages.line().starts_with("Developed in 0.20s · "));
         assert!(
-            editor.status.contains("‘Gone’ is missing"),
+            editor.messages.line().contains("‘Gone’ is missing"),
             "{}",
-            editor.status
+            editor.messages.line()
         );
     }
 

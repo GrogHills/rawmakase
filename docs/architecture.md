@@ -120,6 +120,25 @@ opening find it, into the reason the loader reports. Whether the Library shows a
 its defaults reproduce the file. Preview builds and stored previews follow the
 same rule from the photo's edit record.
 
+`app::messages` owns what the app says to the user. `Editor::messages` is the one
+way to say it, and the Library's own `Messages` are taken on each frame. Each thing
+is said in one place and nothing is drawn over the photo. `note` (progress, small
+confirmations) stays in the status line. `done` (a result, briefly), `warn` (a
+refusal or partial result, longer; neither goes while the pointer is on it or the
+window is away) and `fail` (what the user asked for did not happen, until dismissed)
+show in the top bar after the progress, past a hairline: the worst and newest as a lamp, one line, and a cross on hover that dismisses them all (or Shift+Esc), a problem tinted once as it arrives. A click opens every message in full.
+They take no keys. Without the bar (the chrome hidden) they show small at the
+window's top. A failure a later event ends is posted with a `Topic` (`fail_on`) and
+`settle`d by that event, so a retried save neither repeats a dismissed message nor
+leaves a stale one.
+
+Work the user started shows in the same slot as a label over a sweeping line, once it
+has run for a moment. `Editor::running_work` reads it each frame from the state that
+owns the work (a `Task` and the like), so no call starts or ends it: it goes when the
+work ends, however it ends. New long work adds one line there. Work with a place of
+its own (an export's or scan's progress, a batch's window, a selection's tile, opening
+a photo's badge) is not said again.
+
 `app::monitor` owns the Monitor profile choice (System, sRGB or a chosen ICC
 profile) and resolves it, with what `platform::display` reports about the
 window's display, into the profile each render job captures. `app::display`
@@ -336,9 +355,11 @@ RAW development and exports use the existing CPU implementation.
 
 `develop::gpu` uses portable WGSL compute through wgpu: Metal on macOS, Vulkan
 on supported Linux drivers, including NVIDIA and AMD, and DirectX 12 on Windows.
-Windows leaves Vulkan out unless `WGPU_BACKEND` asks for it, because an Intel
-Vulkan driver crashed the app at launch where DirectX 12 worked (#623); the UI
-and a standalone processor share that choice (`gpu::backends`). On the desktop it shares the
+Windows leaves Vulkan out while a DirectX 12 device can be created, because an
+Intel Vulkan driver crashed the app at launch where DirectX 12 worked (#623). If
+that device fails, it tries Vulkan and then OpenGL before opening the window
+(#768); `WGPU_BACKEND` overrides all of this. The UI and a standalone processor
+share that choice (`gpu::backends`). On the desktop it shares the
 UI's wgpu device (eframe's), which the app creates with the storage limits previews
 need (`gpu::required_limits`) and a high-performance adapter. On Linux the window's
 adapter is the first GPU the system lists instead: the display's GPU, or the discrete

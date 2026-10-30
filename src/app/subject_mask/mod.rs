@@ -367,7 +367,7 @@ impl Editor {
             return;
         }
         if let Some(why) = self.selection_unavailable() {
-            self.status = why.into();
+            self.messages.warn(why);
             return;
         }
         let masks = &self.document.edit.recipe().masks;
@@ -379,7 +379,8 @@ impl Editor {
             Target::Regenerate { .. } => true,
         };
         if !room {
-            self.status = format!("A photo holds up to {MAX_GROUPS} masks");
+            self.messages
+                .warn(format!("A photo holds up to {MAX_GROUPS} masks"));
             return;
         }
         let upgraded = self
@@ -424,7 +425,8 @@ impl Editor {
             },
         });
         self.view.tool = super::state::Tool::Mask;
-        self.status = "Click the subject on the photo, or drag a box around it".into();
+        self.messages
+            .note("Click the subject on the photo, or drag a box around it");
     }
     /// Aims at a generated component: clicks on the photo add to it and leave things
     /// out of it, each one refining the same mask.
@@ -461,7 +463,8 @@ impl Editor {
             applied: Some((mask, component)),
         });
         self.view.tool = super::state::Tool::Mask;
-        self.status = "Click the part of the photo to add, Alt-click to leave out".into();
+        self.messages
+            .note("Click the part of the photo to add, Alt-click to leave out");
     }
     /// A click on the photo while aiming: a point on the object (or, with `positive`
     /// false, on something to leave out). Starts or refines the selection.
@@ -576,10 +579,11 @@ impl Editor {
             }
         };
         self.context.request_repaint();
-        self.status = match &action {
+        let text: String = match &action {
             Action::Auto(feature) => format!("Finding the {}…", feature.name().to_lowercase()),
             Action::Click(_) => "Selecting…".into(),
         };
+        self.messages.note(text);
         let (generation, cancel) = self.selection.task.start();
         let recipe = self.document.edit.recipe().clone();
         self.selection.pending = Some(Pending {
@@ -604,7 +608,7 @@ impl Editor {
     pub(super) fn cancel_selection(&mut self) {
         self.context.request_repaint();
         self.selection.cancel();
-        self.status = "Selection cancelled".into();
+        self.messages.note("Selection cancelled");
     }
     /// A selection finished: apply it if it is still the one wanted and the edit it
     /// was made for still stands, else drop it.
@@ -633,13 +637,14 @@ impl Editor {
             Ok(generated) => generated,
             Err(Failure::Cancelled) => return,
             Err(failure) => {
-                self.status = failure.message();
+                self.messages.fail(failure.message());
                 self.selection.failure = Some((request, failure));
                 return;
             }
         };
         if !pending.guard.holds(self.document.edit.recipe(), request) {
-            self.status = "The masks changed while selecting; nothing was added".into();
+            self.messages
+                .warn("The masks changed while selecting; nothing was added");
             self.discard_generated(Some(generated));
             return;
         }
@@ -655,7 +660,8 @@ impl Editor {
             .collect();
         let bytes = crate::storage::mask_assets::decoded_bytes(ids);
         if bytes > crate::storage::mask_assets::EDIT_BYTES {
-            self.status = "This photo's masks use too much memory for another selection".into();
+            self.messages
+                .warn("This photo's masks use too much memory for another selection");
             self.discard_generated(Some(generated));
             return;
         }
@@ -714,7 +720,8 @@ impl Editor {
             // selected, so it draws no overlay; with neutral sliders nothing else would
             // show the mask until some later change. Render again, now with it.
             self.schedule();
-            self.status = format!("{} selected", request.feature.name());
+            self.messages
+                .note(format!("{} selected", request.feature.name()));
         }
     }
     /// Forgets the raster of a result the edit did not take, so results the user never
@@ -754,7 +761,7 @@ impl Editor {
     pub(super) fn model_installed(&mut self, pack: Pack, result: Result<(), String>) {
         match result {
             Ok(()) => {
-                self.status = "Selection model installed".into();
+                self.messages.done("Selection model installed");
                 match self.selection.prompt {
                     Some(Prompt::Model(request)) if request.feature.pack() == pack => {
                         self.selection.prompt = None;
@@ -763,7 +770,7 @@ impl Editor {
                     _ => {}
                 }
             }
-            Err(why) => self.status = format!("Model not installed: {why}"),
+            Err(why) => self.messages.fail(format!("Model not installed: {why}")),
         }
     }
     /// Asks the installer to download the models (the setup card's Download).
@@ -793,7 +800,7 @@ impl Editor {
             .as_ref()
             .is_some_and(|t| !t.is_finished());
         if self.selection.upgrading.is_some() || running {
-            self.status = "The catalog is being upgraded".into();
+            self.messages.note("The catalog is being upgraded");
             return;
         }
         if !self.flush() {
@@ -826,7 +833,7 @@ impl Editor {
             Err(e) => {
                 self.selection.upgrading = None;
                 self.selection.upgrade_task.finish(generation);
-                self.status = format!("Catalog not upgraded: {e}");
+                self.messages.fail(format!("Catalog not upgraded: {e}"));
             }
         }
     }
@@ -847,12 +854,13 @@ impl Editor {
         match result {
             Ok(backup) => {
                 if let Some(backup) = backup {
-                    self.status = format!("Catalog upgraded · backup: {}", backup.display());
+                    self.messages
+                        .done(format!("Catalog upgraded · backup: {}", backup.display()));
                 }
                 self.selection.prompt = None;
                 self.request_selection(request);
             }
-            Err(why) => self.status = format!("Catalog not upgraded: {why}"),
+            Err(why) => self.messages.fail(format!("Catalog not upgraded: {why}")),
         }
     }
 }
