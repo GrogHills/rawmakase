@@ -901,7 +901,7 @@ fn a_cancel_is_forwarded_even_when_the_request_notices_it_first() {
 }
 
 #[test]
-fn analyzing_a_photo_does_not_run_the_sky_and_sky_needs_no_analysis() {
+fn sky_runs_by_itself_with_no_analysis_before_it() {
     let (endpoint, _, runs) = worker(Fake::of(Photo::of("k1", 2, 2, 50)));
     let session = RemoteSession::new(&endpoint);
     let cancel = AtomicBool::new(false);
