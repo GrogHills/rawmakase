@@ -85,7 +85,8 @@ The Develop loader, Reference View, Library previews, preview builds, exports an
 Sync also fit the default Camera Look of a photo without colour data, once per file
 and build (seconds; a fit cache hit otherwise, and nothing for every other photo).
 The fit takes the job's cancel flag inside its renders and between its stages, so it
-stops as a decode does; a fit stopped that way is neither used nor cached.
+stops as a decode does; a fit stopped that way is neither used nor cached. A job
+waiting for another's fit of the same file sees its own cancel within 50 ms.
 
 One-shot jobs stay detached: Auto, Upright, Auto straighten, Profile → Fit Camera
 Look, the Point Color and
