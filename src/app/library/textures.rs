@@ -376,7 +376,7 @@ impl PreviewTextures {
         image: image::RgbImage,
         recipe_json: String,
     ) {
-        let tag = EditSource::Recipe(recipe_json).tag();
+        let tag = EditSource::Recipe(recipe_json).preview_tag();
         let ticket = self.ticket();
         self.edited_requested.insert(id, ticket);
         self.insert_edited(ctx, id, &image);

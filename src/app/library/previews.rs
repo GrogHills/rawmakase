@@ -163,6 +163,12 @@ impl EditSource {
         crate::raw::developed().hash(&mut h);
         format!("edit-{:016x}", h.finish())
     }
+    /// Identifies this edit's Library preview in the preview cache: [`Self::tag`],
+    /// and how the preview is rendered (Develop's Fit path), so previews rendered
+    /// another way are made again rather than shown beside new ones.
+    pub(crate) fn preview_tag(&self) -> String {
+        format!("{}-fit", self.tag())
+    }
 }
 pub(super) enum EditJob {
     /// Render (or load from cache) catalog photo `id` with its edit. Virtual
@@ -487,7 +493,7 @@ impl Renders {
                 path,
                 source,
                 ahead,
-            } => (*id, *ticket, path.clone(), source.tag(), *ahead),
+            } => (*id, *ticket, path.clone(), source.preview_tag(), *ahead),
             EditJob::Store { .. } => unreachable!("stores are not looked up"),
         };
         let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -581,7 +587,8 @@ impl Renders {
                 let stamp = Stamp::read(&path).ok()?;
                 let image = render(&path, &source, &cancel).ok()?;
                 if let Some(cache) = &mut *cache(&cache_at)
-                    && let Err(error) = cache.store_tagged(&path, &source.tag(), &stamp, &image)
+                    && let Err(error) =
+                        cache.store_tagged(&path, &source.preview_tag(), &stamp, &image)
                 {
                     cache_error = Some(error.to_string());
                 }
@@ -709,13 +716,16 @@ fn next_step(shared: &Shared, wanted: &Wanted, full_threads: usize) -> Step {
             .unwrap_or_else(|e| e.into_inner());
     }
 }
-/// A 640 px preview of `path` developed with `source`.
+/// A 640 px preview of `path` developed with `source`, as Develop's Fit draws it
+/// (`develop::render_fitted`): from a reduced copy of the photo, several times
+/// faster than rendering it whole and reducing the result.
 fn render_edited(
     path: &Path,
     source: &EditSource,
     cancel: &AtomicBool,
 ) -> anyhow::Result<image::RgbImage> {
-    develop_quickly(path, Some(source), 640, cancel)
+    let (image, recipe) = open_quickly(path, Some(source), cancel)?;
+    rgb(crate::develop::render_fitted(&image, &recipe, 640, cancel)?)
 }
 /// `path` developed with `edit` (see [`EditSource::recipe`]) within `edge` pixels:
 /// a RAW from the fast half-size decode, a JPEG, PNG or TIFF from the file.
@@ -725,6 +735,16 @@ pub(super) fn develop_quickly(
     edge: u32,
     cancel: &AtomicBool,
 ) -> anyhow::Result<image::RgbImage> {
+    let (image, recipe) = open_quickly(path, edit, cancel)?;
+    finish_quickly(&image, &recipe, edge, cancel)
+}
+/// `path` opened for a quick render, with the recipe `edit` gives it: a RAW from
+/// the fast half-size decode, a JPEG, PNG or TIFF from the file.
+fn open_quickly(
+    path: &Path,
+    edit: Option<&EditSource>,
+    cancel: &AtomicBool,
+) -> anyhow::Result<(crate::camera_data::CameraImage, Recipe)> {
     let opened = crate::photo::open_source(path, cancel)?;
     let recipe = EditSource::recipe(edit, opened.metadata())?;
     let image = match opened {
@@ -732,7 +752,11 @@ pub(super) fn develop_quickly(
         crate::photo::Opened::Rendered(image) => image,
     };
     anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Cancelled");
-    finish_quickly(&image, &recipe, edge, cancel)
+    Ok((image, recipe))
+}
+fn rgb(out: crate::rendered::Rendered) -> anyhow::Result<image::RgbImage> {
+    image::RgbImage::from_raw(out.width, out.height, out.rgb8())
+        .ok_or_else(|| anyhow::anyhow!("Invalid preview size"))
 }
 /// `image` rendered with `recipe` within `edge` pixels, given up once `cancel`
 /// is set: a render that gives way to Develop or a close stops in its stages,
@@ -743,9 +767,12 @@ fn finish_quickly(
     edge: u32,
     cancel: &AtomicBool,
 ) -> anyhow::Result<image::RgbImage> {
-    let out = crate::develop::render_cancellable(image, &recipe.checked()?, edge, cancel)?;
-    image::RgbImage::from_raw(out.width, out.height, out.rgb8())
-        .ok_or_else(|| anyhow::anyhow!("Invalid preview size"))
+    rgb(crate::develop::render_cancellable(
+        image,
+        &recipe.checked()?,
+        edge,
+        cancel,
+    )?)
 }
 
 #[derive(Default)]
@@ -857,6 +884,50 @@ pub(super) mod tests {
             "{:?}",
             image.get_pixel(0, 0)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn an_edited_preview_is_rendered_as_develops_fit_draws_it() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("textured.png");
+        // Larger than the preview, with edges and gradients a few pixels wide
+        // that a reduced copy keeps, as a photo's.
+        image::RgbImage::from_fn(1800, 1200, |x, y| {
+            let v = (((x / 9) * 5 + (y / 7) * 3) % 200 + 20) as u8;
+            image::Rgb([v, 255 - v, (x / 4 % 128 + 64) as u8])
+        })
+        .save(&path)?;
+        let m = crate::camera_data::Metadata {
+            source: crate::camera_data::Source::Rendered,
+            ..Default::default()
+        };
+        let mut recipe = Recipe {
+            exposure: 0.5,
+            shadows: 0.4,
+            highlights: -0.3,
+            ..Recipe::for_rendered(&m)
+        };
+        recipe.effects.clarity = 0.2;
+        let edit = EditSource::Recipe(serde_json::to_string(&recipe)?);
+        let cancel = AtomicBool::new(false);
+        let preview = render_edited(&path, &edit, &cancel)?;
+        let (image, recipe) = open_quickly(&path, Some(&edit), &cancel)?;
+        let fitted = rgb(crate::develop::render_fitted(
+            &image, &recipe, 640, &cancel,
+        )?)?;
+        assert_eq!(preview, fitted);
+        // Close to the photo rendered whole and reduced, as before.
+        let whole = finish_quickly(&image, &recipe, 640, &cancel)?;
+        assert_eq!(preview.dimensions(), whole.dimensions());
+        let difference = preview
+            .as_raw()
+            .iter()
+            .zip(whole.as_raw())
+            .map(|(a, b)| f64::from(a.abs_diff(*b)))
+            .sum::<f64>()
+            / preview.as_raw().len() as f64;
+        assert!(difference < 4., "{difference}");
         Ok(())
     }
 
