@@ -52,69 +52,72 @@ fn spawn_with(
             Ok(cache) => (Some(cache), None),
             Err(error) => (None, Some(error.to_string())),
         };
-        // A connection each, opened one after another: the first makes the
-        // database.
-        let caches: Vec<_> = (0..threads).map(|_| open()).collect();
+        // A connection each. The first is opened here, as the one worker's
+        // was, and makes the database; the others on their first request, so
+        // a worker that is never asked opens nothing and ends at once.
+        let first = open();
         let rx = Mutex::new(rx);
-        let work = |(mut cache, mut open_error): (Option<PreviewCache>, Option<String>)| loop {
-            let Ok(path) = rx
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .recv()
-            else {
-                break;
-            };
-            let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut cache_error = open_error.clone();
-                let cached = cache.as_ref().and_then(|cache| match cache.load(&path) {
-                    Ok(image) => image,
-                    Err(error) => {
-                        cache_error = Some(error.to_string());
-                        None
-                    }
+        let work = |opened: Option<(Option<PreviewCache>, Option<String>)>| {
+            let mut opened = opened;
+            loop {
+                let Ok(path) = rx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv()
+                else {
+                    break;
+                };
+                let (cache, open_error) = opened.get_or_insert_with(open);
+                let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut cache_error = open_error.clone();
+                    let cached = cache.as_ref().and_then(|cache| match cache.load(&path) {
+                        Ok(image) => image,
+                        Err(error) => {
+                            cache_error = Some(error.to_string());
+                            None
+                        }
+                    });
+                    let image = cached.or_else(|| {
+                        let stamp = Stamp::read(&path).ok()?;
+                        let image = thumbnail(&path).ok()?;
+                        if let Some(cache) = cache.as_mut()
+                            && let Err(error) = cache.store(&path, &stamp, &image)
+                        {
+                            cache_error = Some(error.to_string());
+                        }
+                        Some(image)
+                    });
+                    (image, cache_error)
+                }));
+                // After a panic the preview is unavailable, and the cache, which it may
+                // have left mid-write, is opened again for the next one.
+                let (image, cache_error) = prepared.unwrap_or_else(|_| {
+                    opened = Some(open());
+                    (None, None)
                 });
-                let image = cached.or_else(|| {
-                    let stamp = Stamp::read(&path).ok()?;
-                    let image = thumbnail(&path).ok()?;
-                    if let Some(cache) = &mut cache
-                        && let Err(error) = cache.store(&path, &stamp, &image)
-                    {
-                        cache_error = Some(error.to_string());
-                    }
-                    Some(image)
-                });
-                (image, cache_error)
-            }));
-            // After a panic the preview is unavailable, and the cache, which it may
-            // have left mid-write, is opened again for the next one.
-            let (image, cache_error) = prepared.unwrap_or_else(|_| {
-                (cache, open_error) = open();
-                (None, None)
-            });
-            if result_tx
-                .send(PreviewResult {
-                    path,
-                    image,
-                    cache_error,
-                })
-                .is_err()
-            {
-                break;
+                if result_tx
+                    .send(PreviewResult {
+                        path,
+                        image,
+                        cache_error,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                ctx.request_repaint();
             }
-            ctx.request_repaint();
         };
         // One works on this thread, so a worker the system can't start
         // leaves the others; returns once every worker has ended.
         let work = &work;
-        let mut caches = caches.into_iter();
-        let first = caches.next();
         std::thread::scope(|scope| {
-            for cache in caches {
+            for _ in 1..threads {
                 let _ = std::thread::Builder::new()
                     .name("thumbnail".into())
-                    .spawn_scoped(scope, move || work(cache));
+                    .spawn_scoped(scope, move || work(None));
             }
-            first.into_iter().for_each(work);
+            work(Some(first));
         });
     });
     (tx, result_rx, thread)
@@ -516,9 +519,9 @@ impl Renders {
         answer(&self.wanted, id, ticket, ahead, image)
     }
     /// Renders the job at `index` on the pool of the pace it starts at. A
-    /// photo asked ahead and not shown is not rendered with no cache to keep
-    /// it in (rendered when shown), nor once the pace has dropped since it
-    /// was looked up.
+    /// photo asked ahead and not shown is not rendered once the pace has
+    /// dropped or its list has gone since it was looked up, nor with no cache
+    /// to keep it in (rendered when shown).
     fn start(&self, index: usize) {
         let shared = &self.results.shared;
         let no_cache = cache(&self.cache).is_none();
@@ -527,21 +530,22 @@ impl Renders {
         if state.closed {
             return;
         }
+        let queued = state.jobs.remove(index);
         let EditJob::Render {
             id,
             ticket,
             path,
             source,
             ahead,
-        } = state.jobs.remove(index).job
+        } = queued.job
         else {
             unreachable!("stores are not rendered")
         };
         if ahead && !shown(&self.wanted, id) {
-            let answer = if no_cache {
-                Some(EditResult::Kept(id, ticket))
+            let answer = if queued.dropped || state.pace == Pace::Background {
+                Some(EditResult::Skipped(id, ticket))
             } else {
-                (state.pace == Pace::Background).then_some(EditResult::Skipped(id, ticket))
+                no_cache.then_some(EditResult::Kept(id, ticket))
             };
             if let Some(answer) = answer {
                 drop(state);
@@ -1268,6 +1272,25 @@ pub(super) mod tests {
             Ok(EditResult::Skipped(PhotoId(2), 2))
         ));
         assert!(shared.lock().running.is_empty());
+        // Its list gone while it was looked up (a miss), before its render began.
+        let shared = Arc::<Shared>::default();
+        let queue = EditQueue(shared.clone());
+        queue.set_pace(Pace::Full);
+        queue.send(render_job(4, &path, true))?;
+        assert!(matches!(
+            next_step(&shared, &Wanted::default(), 2),
+            Step::Look(0, true)
+        ));
+        queue.drop_ahead();
+        let cache = PreviewCache::open(&directory.path().join("empty.sqlite3"))?;
+        let (renders, rx) = counting(&shared, Some(cache), Wanted::default());
+        renders.look(0, true);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EditResult::Skipped(PhotoId(4), 4))
+        ));
+        assert!(shared.lock().running.is_empty());
+        drop(queue);
         // Closed since it was looked up.
         let shared = Arc::<Shared>::default();
         shared.lock().jobs.push(queued(render_job(3, &path, false)));
