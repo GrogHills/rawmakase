@@ -309,12 +309,16 @@ impl Drop for Claim {
     }
 }
 /// Claims the fit of `key`, waiting while another caller fits the same file;
-/// `None` once `cancel` is set while waiting.
+/// `None` once `cancel` is set, also when the key comes free: both jobs are
+/// often cancelled together, and a cancelled one must not start a fit.
 fn claim(key: &cache::FitKey, cancel: &AtomicBool) -> Option<Claim> {
     let mut fitting = FITTING.0.lock().unwrap_or_else(|e| e.into_inner());
-    while fitting.contains(key) {
+    loop {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
+        }
+        if !fitting.contains(key) {
+            break;
         }
         // Bounded, so a cancel is seen without the fit ending.
         fitting = FITTING
@@ -673,7 +677,9 @@ mod tests {
         );
         drop(first);
         assert!(waiting.join().unwrap());
-        // Released again: another file or the same one is free.
+        // Released again: the same file is free, but not to a cancelled job,
+        // as when the holder and its waiter are cancelled at once.
+        assert!(claim(&key, &AtomicBool::new(true)).is_none());
         assert!(claim(&key, &AtomicBool::new(false)).is_some());
     }
 
